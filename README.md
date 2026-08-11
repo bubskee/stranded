@@ -12,7 +12,7 @@ An educational implementation of the [Raft consensus algorithm](https://raft.git
 
 ```
 proto 
-→ node skeleton (config/state/rpc plumbing, persist.go stubbed but called in the right places) 
+→ node skeleton (config/state/rpc plumbing, persist.go stubbed) 
 → election (real logic + real persist) 
 → replication (real logic + real persist) 
 → client 
@@ -32,5 +32,8 @@ not as a code generator.
 
 ---
 
-> We said there warn’t no home like a raft, after all. Other places do seem so cramped up and smothery, but a raft don’t. You feel mighty free and easy and comfortable on a raft.
-	—_The Adventures of Huckleberry Finn_, by Mark Twain
+> We said there warn’t no home like a raft, after all. 
+Other places do seem so cramped up and smothery, but a raft don’t. 
+You feel mighty free and easy and comfortable on a raft.  
+
+&nbsp;&nbsp;&nbsp;&nbsp; —_The Adventures of Huckleberry Finn_ by Mark Twain

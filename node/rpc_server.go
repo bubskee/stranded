@@ -3,7 +3,7 @@ package node
 import (
 	"context"
 
-	"github.com/bubskee/stranded/proto/raftpb"
+	raftpb "github.com/bubskee/stranded/proto/raftpb/raft/v1"
 )
 
 // grpcServer adapts *Node to the raftpb.RaftServer interface, keeping wire

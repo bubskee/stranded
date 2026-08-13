@@ -40,3 +40,11 @@ func (n *Node) Run(ctx context.Context) error {
 func (n *Node) resetElectionTimer() {
 	// TODO: randomized duration in [ElectionTimeoutMin, ElectionTimeoutMax)
 }
+
+func (n *Node) RequestVote() {
+	// TODO: election impl
+}
+
+func (n *Node) AppendEntries() {
+	// TODO: persist impl
+}

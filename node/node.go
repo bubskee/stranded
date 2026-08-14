@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	"github.com/bubskee/stranded/proto/raftpb"
 )
 
 type Node struct {
@@ -17,7 +15,7 @@ type Node struct {
 	volatile    VolatileState
 	leaderState *LeaderState // nil unless role == Leader
 
-	peers map[PeerID]raftpb.RaftClient
+	transport Transport
 
 	electionTimer *time.Timer
 
@@ -25,7 +23,6 @@ type Node struct {
 }
 
 func New(cfg Config) (*Node, error) {
-	// TODO: dial peers, build raftpb.RaftClient per peer
 	// TODO: loadPersistentState(cfg.DataDir) — fresh PersistentState{} if none exists
 	return nil, nil
 }
@@ -41,10 +38,10 @@ func (n *Node) resetElectionTimer() {
 	// TODO: randomized duration in [ElectionTimeoutMin, ElectionTimeoutMax)
 }
 
-func (n *Node) RequestVote() {
+func (n *Node) RequestVote(ctx context.Context) {
 	// TODO: election impl
 }
 
-func (n *Node) AppendEntries() {
+func (n *Node) AppendEntries(ctx context.Context) {
 	// TODO: persist impl
 }

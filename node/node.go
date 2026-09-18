@@ -12,9 +12,10 @@ type Node struct {
 	cfg  Config
 	role Role
 
-	persistent  PersistentState
-	volatile    VolatileState
-	leaderState *LeaderState // nil unless role == Leader
+	persistent     PersistentState
+	volatile       VolatileState
+	candidateState *CandidateState // nil unless role == Candidate
+	leaderState    *LeaderState    // nil unless role == Leader
 
 	transport Transport
 
@@ -77,8 +78,16 @@ func (n *Node) startElection() election {
 	defer n.mu.Unlock()
 
 	n.role = Candidate
+	n.leaderState = nil
+
 	n.persistent.CurrentTerm++
 	n.persistent.VotedFor = n.cfg.ID
+
+	n.candidateState = &CandidateState{
+		Votes: map[PeerID]bool{
+			n.cfg.ID: true,
+		},
+	}
 
 	args := RequestVoteArgs{
 		Term:        n.persistent.CurrentTerm,
@@ -104,5 +113,72 @@ func (n *Node) sendRequestVotes(ctx context.Context, e election) {
 }
 
 func (n *Node) requestVote(ctx context.Context, peer PeerID, e election) {
-	_, _ = n.transport.RequestVote(ctx, peer, &e.args)
+	reply, err := n.transport.RequestVote(ctx, peer, &e.args)
+	if err != nil {
+		return
+	}
+
+	n.handleVoteReply(peer, e.term, reply)
+}
+
+func (n *Node) handleVoteReply(
+	peer PeerID,
+	electionTerm uint64,
+	reply *RequestVoteReply,
+) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// This RPC belongs to an election that is no longer current.
+	if n.role != Candidate || n.persistent.CurrentTerm != electionTerm {
+		return
+	}
+
+	// Don't let a reply from another term affect this election.
+	// A higher term should eventually make us step down; we'll test that
+	// behavior separately.
+	if reply.Term != electionTerm {
+		return
+	}
+
+	// Count each peer at most once.
+	if _, seen := n.candidateState.Votes[peer]; seen {
+		return
+	}
+
+	n.candidateState.Votes[peer] = reply.VoteGranted
+
+	granted := 0
+	for _, vote := range n.candidateState.Votes {
+		if vote {
+			granted++
+		}
+	}
+
+	clusterSize := len(n.cfg.Peers) + 1
+	quorum := clusterSize/2 + 1
+
+	if granted >= quorum {
+		n.becomeLeaderLocked()
+	}
+}
+
+func (n *Node) becomeLeaderLocked() {
+	n.role = Leader
+	n.candidateState = nil
+
+	lastIndex := uint64(0)
+	if len(n.persistent.Log) > 0 {
+		lastIndex = n.persistent.Log[len(n.persistent.Log)-1].Index
+	}
+
+	n.leaderState = &LeaderState{
+		NextIndex:  make(map[PeerID]uint64, len(n.cfg.Peers)),
+		MatchIndex: make(map[PeerID]uint64, len(n.cfg.Peers)),
+	}
+
+	for peer := range n.cfg.Peers {
+		n.leaderState.NextIndex[peer] = lastIndex + 1
+		n.leaderState.MatchIndex[peer] = 0
+	}
 }

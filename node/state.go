@@ -48,3 +48,7 @@ type LeaderState struct {
 	NextIndex  map[PeerID]uint64
 	MatchIndex map[PeerID]uint64
 }
+
+type CandidateState struct {
+	Votes map[PeerID]bool
+}

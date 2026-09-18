@@ -13,6 +13,7 @@ func TestResetElectionTimer(t *testing.T) {
 				ElectionTimeoutMin: 100 * time.Millisecond,
 				ElectionTimeoutMax: 100 * time.Millisecond,
 			},
+			storage: &memoryStorage{},
 		}
 
 		n.resetElectionTimer()
@@ -43,6 +44,7 @@ func TestResetElectionTimerRestartsCountdown(t *testing.T) {
 				ElectionTimeoutMin: 100 * time.Millisecond,
 				ElectionTimeoutMax: 100 * time.Millisecond,
 			},
+			storage: &memoryStorage{},
 		}
 
 		n.resetElectionTimer()

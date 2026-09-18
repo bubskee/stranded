@@ -10,6 +10,26 @@ import (
 	"time"
 )
 
+type memoryStorage struct {
+	mu    sync.Mutex
+	state PersistentState
+}
+
+func (s *memoryStorage) Load() (PersistentState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state, nil
+}
+
+func (s *memoryStorage) Save(state PersistentState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state = state
+	return nil
+}
+
 type unavailableTransport struct{}
 
 func (unavailableTransport) RequestVote(
@@ -44,6 +64,7 @@ func TestRunElectionTimeoutStartsElection(t *testing.T) {
 				ElectionTimeoutMax: 100 * time.Millisecond,
 			},
 			transport: unavailableTransport{},
+			storage:   &memoryStorage{},
 		}
 
 		go func() {
@@ -142,6 +163,7 @@ func TestElectionSendsRequestVoteToPeers(t *testing.T) {
 				},
 			},
 			transport: transport,
+			storage:   &memoryStorage{},
 		}
 
 		go func() {
@@ -223,6 +245,7 @@ func TestElectionMajorityBecomesLeader(t *testing.T) {
 					// node-c is unavailable
 				},
 			},
+			storage: &memoryStorage{},
 		}
 
 		go func() {
@@ -271,6 +294,7 @@ func TestHigherTermVoteReplyStepsDown(t *testing.T) {
 					// node-c is unavailable
 				},
 			},
+			storage: &memoryStorage{},
 		}
 
 		go func() {
@@ -318,6 +342,7 @@ func TestSingleNodeElectionBecomesLeader(t *testing.T) {
 				ElectionTimeoutMax: 100 * time.Millisecond,
 			},
 			transport: unavailableTransport{},
+			storage:   &memoryStorage{},
 		}
 
 		go func() {

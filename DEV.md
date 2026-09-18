@@ -29,3 +29,4 @@ challenges, design considerations
   to Multi-Raft by multiplexing many independent Raft groups over shared
   persistence and transport. Keeping the abstraction local for now rather than
   introducing a general `Ready` type prematurely.
+- considered folding candidate vote bookkeeping into general peer tracking, as upstream etcd/raft does. Current Cockroach Raft instead separates election tracking from replication progress. Keeping stranded simpler and role-explicit: candidate votes live in CandidateState, while the immutable election value remains context for asynchronous RPCs.

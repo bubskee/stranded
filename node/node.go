@@ -129,19 +129,22 @@ func (n *Node) handleVoteReply(
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	// A higher term supersedes whatever election/state we're currently in.
+	if reply.Term > n.persistent.CurrentTerm {
+		n.becomeFollowerLocked(reply.Term)
+		return
+	}
+
 	// This RPC belongs to an election that is no longer current.
 	if n.role != Candidate || n.persistent.CurrentTerm != electionTerm {
 		return
 	}
 
-	// Don't let a reply from another term affect this election.
-	// A higher term should eventually make us step down; we'll test that
-	// behavior separately.
-	if reply.Term != electionTerm {
+	// Stale reply from an earlier term.
+	if reply.Term < electionTerm {
 		return
 	}
 
-	// Count each peer at most once.
 	if _, seen := n.candidateState.Votes[peer]; seen {
 		return
 	}
@@ -181,4 +184,12 @@ func (n *Node) becomeLeaderLocked() {
 		n.leaderState.NextIndex[peer] = lastIndex + 1
 		n.leaderState.MatchIndex[peer] = 0
 	}
+}
+
+func (n *Node) becomeFollowerLocked(term uint64) {
+	n.role = Follower
+	n.persistent.CurrentTerm = term
+	n.persistent.VotedFor = ""
+	n.candidateState = nil
+	n.leaderState = nil
 }

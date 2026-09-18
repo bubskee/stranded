@@ -323,3 +323,61 @@ func TestElectionMajorityBecomesLeader(t *testing.T) {
 		}
 	})
 }
+
+func TestHigherTermVoteReplyStepsDown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+					"node-c": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			transport: voteReplyTransport{
+				replies: map[PeerID]RequestVoteReply{
+					"node-b": {
+						Term:        2,
+						VoteGranted: false,
+					},
+					// node-c is unavailable
+				},
+			},
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		votedFor := n.persistent.VotedFor
+		candidateState := n.candidateState
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role after higher-term reply: got %s, want follower", role)
+		}
+
+		if term != 2 {
+			t.Errorf("term after higher-term reply: got %d, want 2", term)
+		}
+
+		if votedFor != "" {
+			t.Errorf("vote after higher-term reply: got %q, want no vote", votedFor)
+		}
+
+		if candidateState != nil {
+			t.Errorf("candidate state after stepping down: got %+v, want nil", candidateState)
+		}
+	})
+}

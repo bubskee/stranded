@@ -251,3 +251,75 @@ func TestElectionSendsRequestVoteToPeers(t *testing.T) {
 		}
 	})
 }
+
+type voteReplyTransport struct {
+	replies map[PeerID]RequestVoteReply
+}
+
+func (t voteReplyTransport) RequestVote(
+	ctx context.Context,
+	peer PeerID,
+	args *RequestVoteArgs,
+) (*RequestVoteReply, error) {
+	reply, ok := t.replies[peer]
+	if !ok {
+		return nil, errors.New("peer unavailable")
+	}
+	return &reply, nil
+}
+
+func (t voteReplyTransport) AppendEntries(
+	ctx context.Context,
+	peer PeerID,
+	args *AppendEntriesArgs,
+) (*AppendEntriesReply, error) {
+	return nil, errors.New("peer unavailable")
+}
+
+func TestElectionMajorityBecomesLeader(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+					"node-c": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			transport: voteReplyTransport{
+				replies: map[PeerID]RequestVoteReply{
+					"node-b": {
+						Term:        1,
+						VoteGranted: true,
+					},
+					// node-c is unavailable
+				},
+			},
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if role != Leader {
+			t.Errorf("role after majority vote: got %s, want leader", role)
+		}
+
+		if term != 1 {
+			t.Errorf("term after election: got %d, want 1", term)
+		}
+	})
+}

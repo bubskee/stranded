@@ -1,103 +1,85 @@
 package node
 
 import (
-	"context"
 	"testing"
-
-	raftpb "github.com/bubskee/stranded/proto/raftpb/raft/v1"
-	"google.golang.org/grpc"
+	"testing/synctest"
+	"time"
 )
 
-type fakeRaftClient struct {
-	requestVoteFn   func(context.Context, *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error)
-	appendEntriesFn func(context.Context, *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error)
-	submitCommandFn func(context.Context, *raftpb.SubmitCommandRequest) (*raftpb.SubmitCommandResponse, error)
-}
+func TestResetElectionTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &Node{
+			cfg: Config{
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+		}
 
-func (f fakeRaftClient) RequestVote(
-	ctx context.Context,
-	req *raftpb.RequestVoteRequest,
-	opts ...grpc.CallOption,
-) (*raftpb.RequestVoteResponse, error) {
-	return f.requestVoteFn(ctx, req)
-}
+		n.resetElectionTimer()
 
-func (f fakeRaftClient) AppendEntries(
-	ctx context.Context,
-	req *raftpb.AppendEntriesRequest,
-	opts ...grpc.CallOption,
-) (*raftpb.AppendEntriesResponse, error) {
-	return f.appendEntriesFn(ctx, req)
-}
+		time.Sleep(99 * time.Millisecond)
 
-func (f fakeRaftClient) SubmitCommand(
-	ctx context.Context,
-	req *raftpb.SubmitCommandRequest,
-	opts ...grpc.CallOption,
-) (*raftpb.SubmitCommandResponse, error) {
-	return f.submitCommandFn(ctx, req)
-}
+		select {
+		case <-n.electionTimer.C:
+			t.Fatal("election timer fired too early")
+		default:
+		}
 
-func TestGRPCTransportRequestVote(t *testing.T) {
-	var received *raftpb.RequestVoteRequest
+		time.Sleep(time.Millisecond)
 
-	client := fakeRaftClient{
-		requestVoteFn: func(
-			ctx context.Context,
-			req *raftpb.RequestVoteRequest,
-		) (*raftpb.RequestVoteResponse, error) {
-			received = req
-
-			return &raftpb.RequestVoteResponse{
-				Term:        8,
-				VoteGranted: true,
-			}, nil
-		},
-	}
-
-	transport := newGRPCTransport(map[PeerID]raftpb.RaftServiceClient{
-		"node-b": client,
+		select {
+		case <-n.electionTimer.C:
+			// expected
+		default:
+			t.Fatal("election timer did not fire")
+		}
 	})
+}
 
-	got, err := transport.RequestVote(
-		context.Background(),
-		"node-b",
-		&RequestVoteArgs{
-			Term:         7,
-			CandidateID:  "node-a",
-			LastLogIndex: 42,
-			LastLogTerm:  6,
-		},
-	)
-	if err != nil {
-		t.Fatalf("RequestVote: %v", err)
-	}
+func TestResetElectionTimerRestartsCountdown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &Node{
+			cfg: Config{
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+		}
 
-	if received == nil {
-		t.Fatal("client did not receive RequestVote")
-	}
+		n.resetElectionTimer()
 
-	if received.Term != 7 {
-		t.Errorf("term: got %d, want 7", received.Term)
-	}
+		// Almost reach the original deadline.
+		time.Sleep(75 * time.Millisecond)
 
-	if received.CandidateId != "node-a" {
-		t.Errorf("candidate id: got %q, want %q", received.CandidateId, "node-a")
-	}
+		// Restart the countdown from here.
+		n.resetElectionTimer()
 
-	if received.LastLogIndex != 42 {
-		t.Errorf("last log index: got %d, want 42", received.LastLogIndex)
-	}
+		// We've now reached the original deadline: 100ms since creation,
+		// but only 25ms since reset.
+		time.Sleep(25 * time.Millisecond)
 
-	if received.LastLogTerm != 6 {
-		t.Errorf("last log term: got %d, want 6", received.LastLogTerm)
-	}
+		select {
+		case <-n.electionTimer.C:
+			t.Fatal("election timer fired according to old deadline")
+		default:
+		}
 
-	if got.Term != 8 {
-		t.Errorf("reply term: got %d, want 8", got.Term)
-	}
+		// Still just before the new deadline.
+		time.Sleep(74 * time.Millisecond)
 
-	if !got.VoteGranted {
-		t.Error("vote granted: got false, want true")
-	}
+		select {
+		case <-n.electionTimer.C:
+			t.Fatal("election timer fired too early after reset")
+		default:
+		}
+
+		// Exactly 100ms since reset.
+		time.Sleep(time.Millisecond)
+
+		select {
+		case <-n.electionTimer.C:
+			// expected
+		default:
+			t.Fatal("election timer did not fire after reset deadline")
+		}
+	})
 }

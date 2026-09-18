@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -35,7 +36,20 @@ func (n *Node) Run(ctx context.Context) error {
 }
 
 func (n *Node) resetElectionTimer() {
-	// TODO: randomized duration in [ElectionTimeoutMin, ElectionTimeoutMax)
+	min := n.cfg.ElectionTimeoutMin
+	max := n.cfg.ElectionTimeoutMax
+
+	timeout := min
+	if max > min {
+		timeout += rand.N(max - min)
+	}
+
+	if n.electionTimer == nil {
+		n.electionTimer = time.NewTimer(timeout)
+		return
+	}
+
+	n.electionTimer.Reset(timeout)
 }
 
 func (n *Node) RequestVote(ctx context.Context) {

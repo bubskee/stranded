@@ -23,4 +23,9 @@ challenges, design considerations
 ## day 3
 
 - weighed benefits of upgrading to `1.27.x` for golang, opted for `1.25.x` floor instead.
--
+- our election snapshot is starting to resemble etcd/raft's `Ready` boundary:
+  consensus transitions produce durable state plus external effects, which are
+  executed outside the core transition. Cockroach and TiKV extend this pattern
+  to Multi-Raft by multiplexing many independent Raft groups over shared
+  persistence and transport. Keeping the abstraction local for now rather than
+  introducing a general `Ready` type prematurely.

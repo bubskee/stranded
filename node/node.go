@@ -17,6 +17,7 @@ type Node struct {
 	candidateState *CandidateState // nil unless role == Candidate
 	leaderState    *LeaderState    // nil unless role == Leader
 
+	storage   Storage
 	transport Transport
 
 	electionTimer *time.Timer

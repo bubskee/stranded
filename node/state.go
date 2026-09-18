@@ -27,9 +27,10 @@ type LogEntry struct {
 	Command []byte
 }
 
-// PersistentState must hit disk (see persist.go) before the node responds
-// to any RPC whose correctness depends on it — RequestVote and AppendEntries
-// both fall in this category per §5.6.
+// PersistentState is the Raft state that must survive crashes. Changes must be
+// made durable before any externally visible action whose correctness depends
+// on them, such as granting a vote, acknowledging AppendEntries, or beginning
+// an election in a new term.
 type PersistentState struct {
 	CurrentTerm uint64
 	VotedFor    PeerID // "" means no vote cast this term

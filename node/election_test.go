@@ -545,3 +545,120 @@ func TestElectionPersistenceFailurePreventsRequestVote(t *testing.T) {
 		}
 	})
 }
+
+func TestHigherTermVoteReplyPersistsFollowerState(t *testing.T) {
+	recorder := &eventRecorder{}
+	storage := &recordingStorage{recorder: recorder}
+
+	n := &Node{
+		cfg: Config{
+			ID: "node-a",
+			Peers: map[PeerID]string{
+				"node-b": "",
+				"node-c": "",
+			},
+		},
+		role: Candidate,
+		persistent: PersistentState{
+			CurrentTerm: 1,
+			VotedFor:    "node-a",
+		},
+		candidateState: &CandidateState{
+			Votes: map[PeerID]bool{
+				"node-a": true,
+			},
+		},
+		storage: storage,
+	}
+
+	n.handleVoteReply(
+		"node-b",
+		1,
+		&RequestVoteReply{
+			Term:        2,
+			VoteGranted: false,
+		},
+	)
+
+	storage.mu.Lock()
+	defer storage.mu.Unlock()
+
+	if len(storage.saved) != 1 {
+		t.Fatalf("saved states: got %d, want 1", len(storage.saved))
+	}
+
+	got := storage.saved[0]
+
+	if got.CurrentTerm != 2 {
+		t.Errorf("persisted term: got %d, want 2", got.CurrentTerm)
+	}
+
+	if got.VotedFor != "" {
+		t.Errorf("persisted vote: got %q, want no vote", got.VotedFor)
+	}
+}
+
+func TestHigherTermVoteReplyPersistenceFailureDoesNotPublishFollowerState(t *testing.T) {
+	persistErr := errors.New("disk exploded")
+	recorder := &eventRecorder{}
+
+	n := &Node{
+		cfg: Config{
+			ID: "node-a",
+			Peers: map[PeerID]string{
+				"node-b": "",
+				"node-c": "",
+			},
+		},
+		role: Candidate,
+		persistent: PersistentState{
+			CurrentTerm: 1,
+			VotedFor:    "node-a",
+		},
+		candidateState: &CandidateState{
+			Votes: map[PeerID]bool{
+				"node-a": true,
+			},
+		},
+		storage: &recordingStorage{
+			recorder: recorder,
+			err:      persistErr,
+		},
+	}
+
+	err := n.handleVoteReply(
+		"node-b",
+		1,
+		&RequestVoteReply{
+			Term:        2,
+			VoteGranted: false,
+		},
+	)
+
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("handleVoteReply error: got %v, want %v", err, persistErr)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.role != Candidate {
+		t.Errorf("role after persistence failure: got %s, want candidate", n.role)
+	}
+
+	if n.persistent.CurrentTerm != 1 {
+		t.Errorf("term after persistence failure: got %d, want 1", n.persistent.CurrentTerm)
+	}
+
+	if n.persistent.VotedFor != "node-a" {
+		t.Errorf(
+			"vote after persistence failure: got %q, want %q",
+			n.persistent.VotedFor,
+			"node-a",
+		)
+	}
+
+	if n.candidateState == nil {
+		t.Error("candidate state cleared after persistence failure")
+	}
+}

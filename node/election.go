@@ -52,47 +52,59 @@ func (n *Node) startElection() (election, error) {
 	return e, nil
 }
 
-func (n *Node) sendRequestVotes(ctx context.Context, e election) {
+func (n *Node) sendRequestVotes(
+	ctx context.Context,
+	e election,
+	errCh chan<- error,
+) {
 	for peer := range n.cfg.Peers {
-		go n.requestVote(ctx, peer, e)
+		go func(peer PeerID) {
+			if err := n.requestVote(ctx, peer, e); err != nil {
+				select {
+				case errCh <- err:
+				case <-ctx.Done():
+				}
+			}
+		}(peer)
 	}
 }
 
-func (n *Node) requestVote(ctx context.Context, peer PeerID, e election) {
+func (n *Node) requestVote(
+	ctx context.Context,
+	peer PeerID,
+	e election,
+) error {
 	reply, err := n.transport.RequestVote(ctx, peer, &e.args)
 	if err != nil {
-		return
+		// An unavailable peer is ordinary Raft behavior, not a node failure.
+		return nil
 	}
 
-	n.handleVoteReply(peer, e.term, reply)
+	return n.handleVoteReply(peer, e.term, reply)
 }
 
 func (n *Node) handleVoteReply(
 	peer PeerID,
 	electionTerm uint64,
 	reply *RequestVoteReply,
-) {
+) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	// A higher term supersedes whatever election/state we're currently in.
 	if reply.Term > n.persistent.CurrentTerm {
-		n.becomeFollowerLocked(reply.Term)
-		return
+		return n.becomeFollowerLocked(reply.Term)
 	}
 
-	// This RPC belongs to an election that is no longer current.
 	if n.role != Candidate || n.persistent.CurrentTerm != electionTerm {
-		return
+		return nil
 	}
 
-	// Stale reply from an earlier term.
 	if reply.Term < electionTerm {
-		return
+		return nil
 	}
 
 	if _, seen := n.candidateState.Votes[peer]; seen {
-		return
+		return nil
 	}
 
 	n.candidateState.Votes[peer] = reply.VoteGranted
@@ -100,6 +112,8 @@ func (n *Node) handleVoteReply(
 	if n.hasElectionQuorumLocked() {
 		n.becomeLeaderLocked()
 	}
+
+	return nil
 }
 
 func (n *Node) hasElectionQuorumLocked() bool {
@@ -136,10 +150,19 @@ func (n *Node) becomeLeaderLocked() {
 	}
 }
 
-func (n *Node) becomeFollowerLocked(term uint64) {
+func (n *Node) becomeFollowerLocked(term uint64) error {
+	next := n.persistent
+	next.CurrentTerm = term
+	next.VotedFor = ""
+
+	if err := n.storage.Save(next); err != nil {
+		return err
+	}
+
+	n.persistent = next
 	n.role = Follower
-	n.persistent.CurrentTerm = term
-	n.persistent.VotedFor = ""
 	n.candidateState = nil
 	n.leaderState = nil
+
+	return nil
 }

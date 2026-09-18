@@ -33,10 +33,15 @@ func New(cfg Config) (*Node, error) {
 func (n *Node) Run(ctx context.Context) error {
 	n.resetElectionTimer()
 
+	errCh := make(chan error, 1)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+
+		case err := <-errCh:
+			return err
 
 		case <-n.electionTimer.C:
 			e, err := n.startElection()
@@ -45,7 +50,7 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 			n.resetElectionTimer()
-			n.sendRequestVotes(ctx, e)
+			n.sendRequestVotes(ctx, e, errCh)
 		}
 	}
 }

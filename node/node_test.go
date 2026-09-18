@@ -381,3 +381,45 @@ func TestHigherTermVoteReplyStepsDown(t *testing.T) {
 		}
 	})
 }
+
+func TestSingleNodeElectionBecomesLeader(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				Peers:              map[PeerID]string{},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			transport: unavailableTransport{},
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		votedFor := n.persistent.VotedFor
+		n.mu.Unlock()
+
+		if role != Leader {
+			t.Errorf("role after single-node election: got %s, want leader", role)
+		}
+
+		if term != 1 {
+			t.Errorf("term after single-node election: got %d, want 1", term)
+		}
+
+		if votedFor != "node-a" {
+			t.Errorf("vote after single-node election: got %q, want %q", votedFor, "node-a")
+		}
+	})
+}

@@ -100,10 +100,16 @@ func (n *Node) startElection() election {
 		args.LastLogTerm = last.Term
 	}
 
-	return election{
+	e := election{
 		term: n.persistent.CurrentTerm,
 		args: args,
 	}
+
+	if n.hasElectionQuorumLocked() {
+		n.becomeLeaderLocked()
+	}
+
+	return e
 }
 
 func (n *Node) sendRequestVotes(ctx context.Context, e election) {
@@ -151,17 +157,7 @@ func (n *Node) handleVoteReply(
 
 	n.candidateState.Votes[peer] = reply.VoteGranted
 
-	granted := 0
-	for _, vote := range n.candidateState.Votes {
-		if vote {
-			granted++
-		}
-	}
-
-	clusterSize := len(n.cfg.Peers) + 1
-	quorum := clusterSize/2 + 1
-
-	if granted >= quorum {
+	if n.hasElectionQuorumLocked() {
 		n.becomeLeaderLocked()
 	}
 }
@@ -192,4 +188,18 @@ func (n *Node) becomeFollowerLocked(term uint64) {
 	n.persistent.VotedFor = ""
 	n.candidateState = nil
 	n.leaderState = nil
+}
+
+func (n *Node) hasElectionQuorumLocked() bool {
+	granted := 0
+	for _, vote := range n.candidateState.Votes {
+		if vote {
+			granted++
+		}
+	}
+
+	clusterSize := len(n.cfg.Peers) + 1
+	quorum := clusterSize/2 + 1
+
+	return granted >= quorum
 }

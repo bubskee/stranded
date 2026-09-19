@@ -2,7 +2,9 @@ package node
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
+	"os"
 	"sync"
 	"time"
 )
@@ -22,12 +24,28 @@ type Node struct {
 
 	electionTimer *time.Timer
 
-	applyCh chan LogEntry
+	applyCh       chan LogEntry
+	requestVoteCh chan requestVoteCall
 }
 
 func New(cfg Config) (*Node, error) {
-	// TODO: load persistent state, initialize storage/transport-facing state.
-	return nil, nil
+	storage := newFileStorage(cfg.DataDir)
+
+	persistent, err := storage.Load()
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		persistent = PersistentState{}
+	}
+
+	return &Node{
+		cfg:        cfg,
+		role:       Follower,
+		persistent: persistent,
+		storage:    storage,
+	}, nil
 }
 
 func (n *Node) Run(ctx context.Context) error {

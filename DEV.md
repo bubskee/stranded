@@ -30,3 +30,4 @@ challenges, design considerations
   persistence and transport. Keeping the abstraction local for now rather than
   introducing a general `Ready` type prematurely.
 - considered folding candidate vote bookkeeping into general peer tracking, as upstream etcd/raft does. Current Cockroach Raft instead separates election tracking from replication progress. Keeping stranded simpler and role-explicit: candidate votes live in CandidateState, while the immutable election value remains context for asynchronous RPCs.
+- checked timer/message ownership against etcd/raft, Cockroach, and HashiCorp Raft. All serialize incoming consensus events with timeout/tick processing at some layer; Cockroach explicitly processes queued Raft messages before ticks to avoid spurious elections. Rather than letting RPC goroutines mutate Raft state and separately signal timer resets, route inbound Raft events through Run; keep network I/O concurrent, but serialize consensus decisions and time.

@@ -1,6 +1,9 @@
 package node
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -84,4 +87,80 @@ func TestResetElectionTimerRestartsCountdown(t *testing.T) {
 			t.Fatal("election timer did not fire after reset deadline")
 		}
 	})
+}
+
+func TestNewLoadsPersistentState(t *testing.T) {
+	dir := t.TempDir()
+
+	want := PersistentState{
+		CurrentTerm: 7,
+		VotedFor:    "node-b",
+		Log: []LogEntry{
+			{Term: 3, Index: 1, Command: []byte("first")},
+			{Term: 7, Index: 2, Command: []byte("second")},
+		},
+	}
+
+	storage := newFileStorage(dir)
+	if err := storage.Save(want); err != nil {
+		t.Fatalf("save persistent state: %v", err)
+	}
+
+	n, err := New(Config{
+		ID:      "node-a",
+		DataDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if !reflect.DeepEqual(n.persistent, want) {
+		t.Fatalf(
+			"persistent state after restart:\n got: %+v\nwant: %+v",
+			n.persistent,
+			want,
+		)
+	}
+
+	if n.role != Follower {
+		t.Errorf("role after restart: got %s, want follower", n.role)
+	}
+}
+
+func TestNewWithMissingStateStartsFresh(t *testing.T) {
+	n, err := New(Config{
+		ID:      "node-a",
+		DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if !reflect.DeepEqual(n.persistent, PersistentState{}) {
+		t.Fatalf(
+			"fresh persistent state: got %+v, want zero value",
+			n.persistent,
+		)
+	}
+
+	if n.role != Follower {
+		t.Errorf("fresh role: got %s, want follower", n.role)
+	}
+}
+
+func TestNewFailsOnCorruptPersistentState(t *testing.T) {
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, persistentStateFile)
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	_, err := New(Config{
+		ID:      "node-a",
+		DataDir: dir,
+	})
+	if err == nil {
+		t.Fatal("New succeeded with corrupt persistent state")
+	}
 }

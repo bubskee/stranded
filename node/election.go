@@ -7,6 +7,16 @@ type election struct {
 	args RequestVoteArgs
 }
 
+type requestVoteCall struct {
+	args  RequestVoteArgs
+	reply chan requestVoteResult
+}
+
+type requestVoteResult struct {
+	reply RequestVoteReply
+	err   error
+}
+
 func (n *Node) startElection() (election, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

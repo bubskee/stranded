@@ -24,8 +24,9 @@ type Node struct {
 
 	electionTimer *time.Timer
 
-	applyCh       chan LogEntry
-	requestVoteCh chan requestVoteCall
+	applyCh         chan LogEntry
+	requestVoteCh   chan requestVoteCall
+	appendEntriesCh chan appendEntriesCall
 }
 
 func New(cfg Config) (*Node, error) {
@@ -41,11 +42,12 @@ func New(cfg Config) (*Node, error) {
 	}
 
 	return &Node{
-		cfg:           cfg,
-		role:          Follower,
-		persistent:    persistent,
-		storage:       storage,
-		requestVoteCh: make(chan requestVoteCall),
+		cfg:             cfg,
+		role:            Follower,
+		persistent:      persistent,
+		storage:         storage,
+		requestVoteCh:   make(chan requestVoteCall),
+		appendEntriesCh: make(chan appendEntriesCall),
 	}, nil
 }
 
@@ -70,6 +72,18 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 			call.reply <- requestVoteResult{
+				reply: reply,
+				err:   err,
+			}
+
+			if err != nil {
+				return err
+			}
+
+		case call := <-n.appendEntriesCh:
+			reply, err := n.processAppendEntries(call.args)
+
+			call.reply <- appendEntriesResult{
 				reply: reply,
 				err:   err,
 			}

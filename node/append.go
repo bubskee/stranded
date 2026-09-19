@@ -1,5 +1,7 @@
 package node
 
+import "context"
+
 type appendEntriesCall struct {
 	args  AppendEntriesArgs
 	reply chan appendEntriesResult
@@ -26,4 +28,29 @@ func (n *Node) processAppendEntries(
 
 	// later semantics
 	return reply, nil
+}
+
+func (n *Node) submitAppendEntries(
+	ctx context.Context,
+	args AppendEntriesArgs,
+) (AppendEntriesReply, error) {
+	replyCh := make(chan appendEntriesResult, 1)
+
+	call := appendEntriesCall{
+		args:  args,
+		reply: replyCh,
+	}
+
+	select {
+	case n.appendEntriesCh <- call:
+	case <-ctx.Done():
+		return AppendEntriesReply{}, ctx.Err()
+	}
+
+	select {
+	case result := <-replyCh:
+		return result.reply, result.err
+	case <-ctx.Done():
+		return AppendEntriesReply{}, ctx.Err()
+	}
 }

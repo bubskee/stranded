@@ -452,3 +452,17 @@ func TestRunRejectsStaleAppendEntries(t *testing.T) {
 		}
 	})
 }
+
+func TestNewInitializesAppendEntriesChannel(t *testing.T) {
+	n, err := New(Config{
+		ID:      "node-a",
+		DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if n.requestVoteCh == nil {
+		t.Fatal("appendEntriesCh is nil")
+	}
+}

@@ -268,3 +268,146 @@ func TestRunHigherTermRequestVotePersistenceFailureStopsNode(t *testing.T) {
 		}
 	})
 }
+
+func TestGrantedRequestVoteResetsElectionTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:       &memoryStorage{},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		// Approach the original election deadline.
+		time.Sleep(75 * time.Millisecond)
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        3,
+			CandidateID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if !reply.VoteGranted {
+			t.Fatal("eligible RequestVote was not granted")
+		}
+
+		// Reach the original deadline: only 25ms have elapsed since granting.
+		time.Sleep(25 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role at old election deadline: got %s, want follower", role)
+		}
+
+		if term != 3 {
+			t.Errorf("term at old election deadline: got %d, want 3", term)
+		}
+
+		// Still immediately before the new deadline.
+		time.Sleep(74 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role = n.role
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role before reset election deadline: got %s, want follower", role)
+		}
+
+		// 100ms since the granted vote: election may now begin.
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		term = n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if term != 4 {
+			t.Errorf("term after reset election deadline: got %d, want 4", term)
+		}
+	})
+}
+
+func TestDeniedRequestVoteDoesNotResetElectionTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log: []LogEntry{
+					{Term: 3, Index: 5},
+				},
+			},
+			storage:       &memoryStorage{},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		// Approach the original election deadline.
+		time.Sleep(75 * time.Millisecond)
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:         3,
+			CandidateID:  "node-b",
+			LastLogTerm:  2,
+			LastLogIndex: 100,
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if reply.VoteGranted {
+			t.Fatal("RequestVote with stale log was granted")
+		}
+
+		// The denied request must not move the deadline.
+		time.Sleep(25 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if term != 4 {
+			t.Errorf("term at original election deadline: got %d, want 4", term)
+		}
+
+		if role != Leader {
+			t.Errorf("role at original election deadline: got %s, want leader", role)
+		}
+	})
+}

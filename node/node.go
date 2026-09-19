@@ -65,6 +65,10 @@ func (n *Node) Run(ctx context.Context) error {
 		case call := <-n.requestVoteCh:
 			reply, err := n.processRequestVote(call.args)
 
+			if err == nil && reply.VoteGranted {
+				n.resetElectionTimer()
+			}
+
 			call.reply <- requestVoteResult{
 				reply: reply,
 				err:   err,

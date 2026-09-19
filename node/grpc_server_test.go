@@ -65,3 +65,62 @@ func TestGRPCRequestVoteRoutesThroughNode(t *testing.T) {
 		}
 	})
 }
+
+func TestGRPCAppendEntriesRoutesThroughNode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		server := &grpcServer{node: n}
+
+		time.Sleep(75 * time.Millisecond)
+
+		reply, err := server.AppendEntries(ctx, &raftpb.AppendEntriesRequest{
+			Term:     3,
+			LeaderId: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("AppendEntries: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		// Reach the original election deadline. Routing through Run should
+		// have reset it.
+		time.Sleep(25 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role at old election deadline: got %s, want follower", role)
+		}
+
+		if term != 3 {
+			t.Errorf("term at old election deadline: got %d, want 3", term)
+		}
+	})
+}

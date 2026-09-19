@@ -32,10 +32,37 @@ func (s *grpcServer) RequestVote(
 	}, nil
 }
 
-func (s *grpcServer) AppendEntries(ctx context.Context, args *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
-	s.node.mu.Lock()
-	defer s.node.mu.Unlock()
-	return &raftpb.AppendEntriesResponse{}, nil
+func (s *grpcServer) AppendEntries(
+	ctx context.Context,
+	req *raftpb.AppendEntriesRequest,
+) (*raftpb.AppendEntriesResponse, error) {
+	entries := make([]LogEntry, len(req.Entries))
+	for i, entry := range req.Entries {
+		entries[i] = LogEntry{
+			Term:    entry.Term,
+			Index:   entry.Index,
+			Command: entry.Command,
+		}
+	}
+
+	reply, err := s.node.submitAppendEntries(ctx, AppendEntriesArgs{
+		Term:         req.Term,
+		LeaderID:     PeerID(req.LeaderId),
+		PrevLogIndex: req.PrevLogIndex,
+		PrevLogTerm:  req.PrevLogTerm,
+		Entries:      entries,
+		LeaderCommit: req.LeaderCommit,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &raftpb.AppendEntriesResponse{
+		Term:          reply.Term,
+		Success:       reply.Success,
+		ConflictIndex: reply.ConflictIndex,
+		ConflictTerm:  reply.ConflictTerm,
+	}, nil
 }
 
 func (s *grpcServer) ClientRequest(ctx context.Context, args *raftpb.SubmitCommandRequest) (*raftpb.SubmitCommandResponse, error) {

@@ -224,6 +224,46 @@ func (n *Node) processRequestVote(
 		reply.Term = n.persistent.CurrentTerm
 	}
 
+	if n.persistent.VotedFor != "" &&
+		n.persistent.VotedFor != args.CandidateID {
+		return reply, nil
+	}
+
+	if !n.candidateLogUpToDateLocked(args) {
+		return reply, nil
+	}
+
+	if n.persistent.VotedFor == "" {
+		next := n.persistent
+		next.VotedFor = args.CandidateID
+
+		if err := n.storage.Save(next); err != nil {
+			return RequestVoteReply{}, err
+		}
+
+		n.persistent = next
+	}
+
+	reply.Term = n.persistent.CurrentTerm
+	reply.VoteGranted = true
+
 	// More RequestVote semantics next.
 	return reply, nil
+}
+
+func (n *Node) candidateLogUpToDateLocked(args RequestVoteArgs) bool {
+	lastIndex := uint64(0)
+	lastTerm := uint64(0)
+
+	if len(n.persistent.Log) > 0 {
+		last := n.persistent.Log[len(n.persistent.Log)-1]
+		lastIndex = last.Index
+		lastTerm = last.Term
+	}
+
+	if args.LastLogTerm != lastTerm {
+		return args.LastLogTerm > lastTerm
+	}
+
+	return args.LastLogIndex >= lastIndex
 }

@@ -782,3 +782,223 @@ func TestRunHigherTermRequestVoteStepsDown(t *testing.T) {
 		}
 	})
 }
+
+func TestRunRejectsRequestVoteAfterVotingForAnotherCandidate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				VotedFor:    "node-c",
+			},
+			storage:       &memoryStorage{},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        3,
+			CandidateID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		if reply.VoteGranted {
+			t.Error("RequestVote granted after voting for another candidate")
+		}
+
+		n.mu.Lock()
+		votedFor := n.persistent.VotedFor
+		n.mu.Unlock()
+
+		if votedFor != "node-c" {
+			t.Errorf("vote changed: got %q, want %q", votedFor, "node-c")
+		}
+	})
+}
+
+func TestRunGrantsRequestVoteWhenEligible(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		storage := &memoryStorage{
+			state: PersistentState{
+				CurrentTerm: 3,
+			},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:       storage,
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        3,
+			CandidateID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		if !reply.VoteGranted {
+			t.Error("eligible RequestVote was not granted")
+		}
+
+		n.mu.Lock()
+		votedFor := n.persistent.VotedFor
+		n.mu.Unlock()
+
+		if votedFor != "node-b" {
+			t.Errorf("vote after RequestVote: got %q, want %q", votedFor, "node-b")
+		}
+
+		storage.mu.Lock()
+		persistedVote := storage.state.VotedFor
+		storage.mu.Unlock()
+
+		if persistedVote != "node-b" {
+			t.Errorf("persisted vote: got %q, want %q", persistedVote, "node-b")
+		}
+	})
+}
+
+func TestRunRejectsRequestVoteWithStaleLog(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log: []LogEntry{
+					{Term: 3, Index: 5},
+				},
+			},
+			storage:       &memoryStorage{},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:         3,
+			CandidateID:  "node-b",
+			LastLogTerm:  2,
+			LastLogIndex: 100,
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if reply.VoteGranted {
+			t.Error("RequestVote granted to candidate with stale log")
+		}
+	})
+}
+
+func TestRunRequestVotePersistenceFailureDoesNotGrantVote(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		persistErr := errors.New("disk exploded")
+		recorder := &eventRecorder{}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage: &recordingStorage{
+				recorder: recorder,
+				err:      persistErr,
+			},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- n.Run(ctx)
+		}()
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        3,
+			CandidateID: "node-b",
+		})
+
+		if !errors.Is(err, persistErr) {
+			t.Errorf("submit RequestVote error: got %v, want %v", err, persistErr)
+		}
+
+		if reply.VoteGranted {
+			t.Error("RequestVote granted after persistence failure")
+		}
+
+		n.mu.Lock()
+		votedFor := n.persistent.VotedFor
+		n.mu.Unlock()
+
+		if votedFor != "" {
+			t.Errorf("vote published after persistence failure: got %q, want no vote", votedFor)
+		}
+
+		select {
+		case err := <-runErr:
+			if !errors.Is(err, persistErr) {
+				t.Errorf("Run error: got %v, want %v", err, persistErr)
+			}
+
+		default:
+			cancel()
+			synctest.Wait()
+			<-runErr
+			t.Error("Run did not stop after persistence failure")
+		}
+	})
+}

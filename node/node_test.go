@@ -411,3 +411,44 @@ func TestDeniedRequestVoteDoesNotResetElectionTimer(t *testing.T) {
 		}
 	})
 }
+
+func TestRunRejectsStaleAppendEntries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:     2,
+			LeaderID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		if reply.Success {
+			t.Error("stale AppendEntries was accepted")
+		}
+	})
+}

@@ -34,6 +34,12 @@ func (n *Node) processAppendEntries(
 		reply.Term = n.persistent.CurrentTerm
 	}
 
+	if args.Term == n.persistent.CurrentTerm && n.role == Candidate {
+		n.role = Follower
+		n.candidateState = nil
+		n.leaderState = nil
+	}
+
 	// later semantics
 	return reply, nil
 }

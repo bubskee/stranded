@@ -31,3 +31,25 @@ challenges, design considerations
   introducing a general `Ready` type prematurely.
 - considered folding candidate vote bookkeeping into general peer tracking, as upstream etcd/raft does. Current Cockroach Raft instead separates election tracking from replication progress. Keeping stranded simpler and role-explicit: candidate votes live in CandidateState, while the immutable election value remains context for asynchronous RPCs.
 - checked timer/message ownership against etcd/raft, Cockroach, and HashiCorp Raft. All serialize incoming consensus events with timeout/tick processing at some layer; Cockroach explicitly processes queued Raft messages before ticks to avoid spurious elections. Rather than letting RPC goroutines mutate Raft state and separately signal timer resets, route inbound Raft events through Run; keep network I/O concurrent, but serialize consensus decisions and time.
+
+## day 4
+
+- made stable-storage ordering explicit as prepare → persist → publish:
+  consensus state changes that affect externally visible behavior are not
+  published in memory until the corresponding persistent state has been saved.
+  A local persistence failure is treated as fatal to the running node rather
+  than as an ordinary peer/network failure.
+- `fileStorage` remains mechanism-only: `Load` reports a missing state file as
+  an error; `New` owns the lifecycle policy that missing state means a fresh
+  node. Corrupt or otherwise unreadable persisted state prevents startup.
+- began routing inbound Raft work through `Run` rather than letting transport
+  goroutines mutate consensus state directly. Network I/O may remain concurrent,
+  but term/role/vote decisions and time-related events should be serialized
+  through one consensus-processing path.
+- keeping the event seam typed for now (`requestVoteCall` /
+  `requestVoteResult`) rather than introducing a generic event type before more
+  event kinds justify it.
+- keeping physical `time.Timer` election timing for now. etcd/raft's logical
+  tick model is attractive because it turns time into another deterministic
+  state-machine input, but first establishing `Run` as the serialization point;
+  revisit logical ticks once RPCs and vote replies flow through that path.

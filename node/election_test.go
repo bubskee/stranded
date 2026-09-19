@@ -662,3 +662,44 @@ func TestHigherTermVoteReplyPersistenceFailureDoesNotPublishFollowerState(t *tes
 		t.Error("candidate state cleared after persistence failure")
 	}
 }
+
+func TestRunRejectsStaleRequestVote(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:       &memoryStorage{},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        2,
+			CandidateID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		if reply.VoteGranted {
+			t.Error("stale RequestVote was granted")
+		}
+	})
+}

@@ -176,3 +176,46 @@ func (n *Node) becomeFollowerLocked(term uint64) error {
 
 	return nil
 }
+
+func (n *Node) submitRequestVote(
+	ctx context.Context,
+	args RequestVoteArgs,
+) (RequestVoteReply, error) {
+	replyCh := make(chan requestVoteResult, 1)
+
+	call := requestVoteCall{
+		args:  args,
+		reply: replyCh,
+	}
+
+	select {
+	case n.requestVoteCh <- call:
+	case <-ctx.Done():
+		return RequestVoteReply{}, ctx.Err()
+	}
+
+	select {
+	case result := <-replyCh:
+		return result.reply, result.err
+	case <-ctx.Done():
+		return RequestVoteReply{}, ctx.Err()
+	}
+}
+
+func (n *Node) processRequestVote(
+	args RequestVoteArgs,
+) (RequestVoteReply, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	reply := RequestVoteReply{
+		Term: n.persistent.CurrentTerm,
+	}
+
+	if args.Term < n.persistent.CurrentTerm {
+		return reply, nil
+	}
+
+	// More RequestVote semantics next.
+	return reply, nil
+}

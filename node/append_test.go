@@ -440,3 +440,177 @@ func TestRunAppendsEntryAfterMatchingPrefix(t *testing.T) {
 		}
 	})
 }
+
+func TestRunAppendEntriesPersistenceFailureDoesNotPublishLog(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		persistErr := errors.New("disk exploded")
+		recorder := &eventRecorder{}
+
+		old := LogEntry{Term: 1, Index: 1, Command: []byte("old")}
+		sentinel := LogEntry{Term: 99, Index: 99, Command: []byte("sentinel")}
+
+		backing := []LogEntry{old, sentinel}
+		log := backing[:1]
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log:         log,
+			},
+			storage: &recordingStorage{
+				recorder: recorder,
+				err:      persistErr,
+			},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- n.Run(ctx)
+		}()
+
+		entry := LogEntry{
+			Term:    3,
+			Index:   2,
+			Command: []byte("new"),
+		}
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 1,
+			PrevLogTerm:  1,
+			Entries:      []LogEntry{entry},
+		})
+
+		if !errors.Is(err, persistErr) {
+			t.Errorf("submit AppendEntries error: got %v, want %v", err, persistErr)
+		}
+
+		if reply.Success {
+			t.Error("AppendEntries succeeded after persistence failure")
+		}
+
+		n.mu.Lock()
+		gotLog := append([]LogEntry(nil), n.persistent.Log...)
+		n.mu.Unlock()
+
+		if !reflect.DeepEqual(gotLog, []LogEntry{old}) {
+			t.Errorf("log published after persistence failure: got %+v", gotLog)
+		}
+
+		// Catch mutation through spare capacity in the old slice.
+		if !reflect.DeepEqual(backing[1], sentinel) {
+			t.Errorf("old log backing array mutated: got %+v, want %+v", backing[1], sentinel)
+		}
+
+		select {
+		case err := <-runErr:
+			if !errors.Is(err, persistErr) {
+				t.Errorf("Run error: got %v, want %v", err, persistErr)
+			}
+		default:
+			cancel()
+			synctest.Wait()
+			<-runErr
+			t.Error("Run did not stop after persistence failure")
+		}
+	})
+}
+
+func TestRunReplacesConflictingLogSuffix(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		oldLog := []LogEntry{
+			{Term: 1, Index: 1, Command: []byte("one")},
+			{Term: 2, Index: 2, Command: []byte("old-two")},
+			{Term: 2, Index: 3, Command: []byte("old-three")},
+		}
+
+		storage := &memoryStorage{
+			state: PersistentState{
+				CurrentTerm: 4,
+				Log:         oldLog,
+			},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 4,
+				Log:         oldLog,
+			},
+			storage:         storage,
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		replacement := LogEntry{
+			Term:    3,
+			Index:   2,
+			Command: []byte("new-two"),
+		}
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         4,
+			LeaderID:     "node-b",
+			PrevLogIndex: 1,
+			PrevLogTerm:  1,
+			Entries:      []LogEntry{replacement},
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if !reply.Success {
+			t.Fatal("AppendEntries with matching prefix was rejected")
+		}
+
+		wantLog := []LogEntry{
+			oldLog[0],
+			replacement,
+		}
+
+		n.mu.Lock()
+		gotLog := append([]LogEntry(nil), n.persistent.Log...)
+		n.mu.Unlock()
+
+		if !reflect.DeepEqual(gotLog, wantLog) {
+			t.Errorf(
+				"log after conflicting AppendEntries:\n got: %+v\nwant: %+v",
+				gotLog,
+				wantLog,
+			)
+		}
+
+		storage.mu.Lock()
+		persistedLog := append([]LogEntry(nil), storage.state.Log...)
+		storage.mu.Unlock()
+
+		if !reflect.DeepEqual(persistedLog, wantLog) {
+			t.Errorf(
+				"persisted log after conflicting AppendEntries:\n got: %+v\nwant: %+v",
+				persistedLog,
+				wantLog,
+			)
+		}
+	})
+}

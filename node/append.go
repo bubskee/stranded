@@ -46,13 +46,52 @@ func (n *Node) processAppendEntries(
 
 	if len(args.Entries) > 0 {
 		next := n.persistent
-		next.Log = append(append([]LogEntry(nil), n.persistent.Log...), args.Entries...)
+		next.Log = append([]LogEntry(nil), n.persistent.Log...)
 
-		if err := n.storage.Save(next); err != nil {
-			return AppendEntriesReply{}, err
+		changed := false
+
+		for i, incoming := range args.Entries {
+			found := false
+
+			for j, existing := range next.Log {
+				if existing.Index != incoming.Index {
+					continue
+				}
+
+				found = true
+
+				if existing.Term != incoming.Term {
+					// Conflict: discard this entry and everything after it,
+					// then append the leader's remaining suffix.
+					next.Log = append(
+						append([]LogEntry(nil), next.Log[:j]...),
+						args.Entries[i:]...,
+					)
+					changed = true
+				}
+
+				break
+			}
+
+			if changed {
+				break
+			}
+
+			if !found {
+				// Follower's log ends before the leader's suffix.
+				next.Log = append(next.Log, args.Entries[i:]...)
+				changed = true
+				break
+			}
 		}
 
-		n.persistent = next
+		if changed {
+			if err := n.storage.Save(next); err != nil {
+				return AppendEntriesReply{}, err
+			}
+
+			n.persistent = next
+		}
 	}
 
 	reply.Success = true

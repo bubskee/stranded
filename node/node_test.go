@@ -543,3 +543,64 @@ func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
 		}
 	})
 }
+
+func TestStaleAppendEntriesDoesNotResetElectionTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(75 * time.Millisecond)
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:     2,
+			LeaderID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		if reply.Success {
+			t.Fatal("stale AppendEntries succeeded")
+		}
+
+		// Reach the original deadline. Stale leader traffic must not
+		// postpone the election.
+		time.Sleep(25 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if term != 4 {
+			t.Errorf("term at original election deadline: got %d, want 4", term)
+		}
+
+		if role != Leader {
+			t.Errorf("role at original election deadline: got %s, want leader", role)
+		}
+	})
+}

@@ -41,10 +41,11 @@ func New(cfg Config) (*Node, error) {
 	}
 
 	return &Node{
-		cfg:        cfg,
-		role:       Follower,
-		persistent: persistent,
-		storage:    storage,
+		cfg:           cfg,
+		role:          Follower,
+		persistent:    persistent,
+		storage:       storage,
+		requestVoteCh: make(chan requestVoteCall),
 	}, nil
 }
 

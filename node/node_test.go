@@ -164,3 +164,17 @@ func TestNewFailsOnCorruptPersistentState(t *testing.T) {
 		t.Fatal("New succeeded with corrupt persistent state")
 	}
 }
+
+func TestNewInitializesRequestVoteChannel(t *testing.T) {
+	n, err := New(Config{
+		ID:      "node-a",
+		DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if n.requestVoteCh == nil {
+		t.Fatal("requestVoteCh is nil")
+	}
+}

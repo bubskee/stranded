@@ -83,6 +83,10 @@ func (n *Node) Run(ctx context.Context) error {
 		case call := <-n.appendEntriesCh:
 			reply, err := n.processAppendEntries(call.args)
 
+			if err == nil && call.args.Term >= reply.Term {
+				n.resetElectionTimer()
+			}
+
 			call.reply <- appendEntriesResult{
 				reply: reply,
 				err:   err,

@@ -466,3 +466,80 @@ func TestNewInitializesAppendEntriesChannel(t *testing.T) {
 		t.Fatal("appendEntriesCh is nil")
 	}
 }
+
+func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		// Approach the original election deadline.
+		time.Sleep(75 * time.Millisecond)
+
+		_, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:     3,
+			LeaderID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		// Original deadline. Only 25ms since leader contact.
+		time.Sleep(25 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role at old election deadline: got %s, want follower", role)
+		}
+
+		if term != 3 {
+			t.Errorf("term at old election deadline: got %d, want 3", term)
+		}
+
+		// Still immediately before the reset deadline.
+		time.Sleep(74 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role = n.role
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role before reset election deadline: got %s, want follower", role)
+		}
+
+		// 100ms since AppendEntries: election may now begin.
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		term = n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if term != 4 {
+			t.Errorf("term after reset election deadline: got %d, want 4", term)
+		}
+	})
+}

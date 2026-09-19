@@ -12,10 +12,24 @@ type grpcServer struct {
 	node *Node
 }
 
-func (s *grpcServer) RequestVote(ctx context.Context, args *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
-	s.node.mu.Lock()
-	defer s.node.mu.Unlock()
-	return &raftpb.RequestVoteResponse{}, nil
+func (s *grpcServer) RequestVote(
+	ctx context.Context,
+	req *raftpb.RequestVoteRequest,
+) (*raftpb.RequestVoteResponse, error) {
+	reply, err := s.node.submitRequestVote(ctx, RequestVoteArgs{
+		Term:         req.Term,
+		CandidateID:  PeerID(req.CandidateId),
+		LastLogIndex: req.LastLogIndex,
+		LastLogTerm:  req.LastLogTerm,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &raftpb.RequestVoteResponse{
+		Term:        reply.Term,
+		VoteGranted: reply.VoteGranted,
+	}, nil
 }
 
 func (s *grpcServer) AppendEntries(ctx context.Context, args *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {

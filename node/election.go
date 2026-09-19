@@ -216,6 +216,14 @@ func (n *Node) processRequestVote(
 		return reply, nil
 	}
 
+	if args.Term > n.persistent.CurrentTerm {
+		if err := n.becomeFollowerLocked(args.Term); err != nil {
+			return RequestVoteReply{}, err
+		}
+
+		reply.Term = n.persistent.CurrentTerm
+	}
+
 	// More RequestVote semantics next.
 	return reply, nil
 }

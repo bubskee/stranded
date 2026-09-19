@@ -70,6 +70,10 @@ func (n *Node) Run(ctx context.Context) error {
 				err:   err,
 			}
 
+			if err != nil {
+				return err
+			}
+
 		case <-n.electionTimer.C:
 			e, err := n.startElection()
 			if err != nil {

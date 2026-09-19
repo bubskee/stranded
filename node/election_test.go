@@ -703,3 +703,82 @@ func TestRunRejectsStaleRequestVote(t *testing.T) {
 		}
 	})
 }
+
+func TestRunHigherTermRequestVoteStepsDown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		storage := &memoryStorage{
+			state: PersistentState{
+				CurrentTerm: 1,
+				VotedFor:    "node-a",
+			},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Candidate,
+			persistent: PersistentState{
+				CurrentTerm: 1,
+				VotedFor:    "node-a",
+			},
+			candidateState: &CandidateState{
+				Votes: map[PeerID]bool{
+					"node-a": true,
+				},
+			},
+			storage:       storage,
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        2,
+			CandidateID: "node-b",
+		})
+		if err != nil {
+			t.Fatalf("submit RequestVote: %v", err)
+		}
+
+		if reply.Term != 2 {
+			t.Errorf("reply term: got %d, want 2", reply.Term)
+		}
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		candidateState := n.candidateState
+		n.mu.Unlock()
+
+		if role != Follower {
+			t.Errorf("role after higher-term RequestVote: got %s, want follower", role)
+		}
+
+		if term != 2 {
+			t.Errorf("term after higher-term RequestVote: got %d, want 2", term)
+		}
+
+		if candidateState != nil {
+			t.Errorf(
+				"candidate state after higher-term RequestVote: got %+v, want nil",
+				candidateState,
+			)
+		}
+
+		storage.mu.Lock()
+		persistedTerm := storage.state.CurrentTerm
+		storage.mu.Unlock()
+
+		if persistedTerm != 2 {
+			t.Errorf("persisted term: got %d, want 2", persistedTerm)
+		}
+	})
+}

@@ -1,6 +1,8 @@
 package node
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -177,4 +179,92 @@ func TestNewInitializesRequestVoteChannel(t *testing.T) {
 	if n.requestVoteCh == nil {
 		t.Fatal("requestVoteCh is nil")
 	}
+}
+
+func TestRunHigherTermRequestVotePersistenceFailureStopsNode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		persistErr := errors.New("disk exploded")
+		recorder := &eventRecorder{}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Candidate,
+			persistent: PersistentState{
+				CurrentTerm: 1,
+				VotedFor:    "node-a",
+			},
+			candidateState: &CandidateState{
+				Votes: map[PeerID]bool{
+					"node-a": true,
+				},
+			},
+			storage: &recordingStorage{
+				recorder: recorder,
+				err:      persistErr,
+			},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- n.Run(ctx)
+		}()
+
+		_, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        2,
+			CandidateID: "node-b",
+		})
+
+		if !errors.Is(err, persistErr) {
+			t.Errorf("submit RequestVote error: got %v, want %v", err, persistErr)
+		}
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		votedFor := n.persistent.VotedFor
+		candidateState := n.candidateState
+		n.mu.Unlock()
+
+		if role != Candidate {
+			t.Errorf("role after persistence failure: got %s, want candidate", role)
+		}
+
+		if term != 1 {
+			t.Errorf("term after persistence failure: got %d, want 1", term)
+		}
+
+		if votedFor != "node-a" {
+			t.Errorf(
+				"vote after persistence failure: got %q, want %q",
+				votedFor,
+				"node-a",
+			)
+		}
+
+		if candidateState == nil {
+			t.Error("candidate state cleared after persistence failure")
+		}
+
+		select {
+		case err := <-runErr:
+			if !errors.Is(err, persistErr) {
+				t.Errorf("Run error: got %v, want %v", err, persistErr)
+			}
+
+		default:
+			// Cleanup for the intentionally-red implementation, where Run
+			// reports the error to the caller but keeps running.
+			cancel()
+			synctest.Wait()
+			<-runErr
+			t.Error("Run did not stop after persistence failure")
+		}
+	})
 }

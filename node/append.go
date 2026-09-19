@@ -94,6 +94,21 @@ func (n *Node) processAppendEntries(
 		}
 	}
 
+	if args.LeaderCommit > n.volatile.CommitIndex {
+		lastIndex := uint64(0)
+		for _, entry := range n.persistent.Log {
+			if entry.Index > lastIndex {
+				lastIndex = entry.Index
+			}
+		}
+
+		if args.LeaderCommit < lastIndex {
+			n.volatile.CommitIndex = args.LeaderCommit
+		} else {
+			n.volatile.CommitIndex = lastIndex
+		}
+	}
+
 	reply.Success = true
 	return reply, nil
 }

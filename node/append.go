@@ -26,6 +26,14 @@ func (n *Node) processAppendEntries(
 		return reply, nil
 	}
 
+	if args.Term > n.persistent.CurrentTerm {
+		if err := n.becomeFollowerLocked(args.Term); err != nil {
+			return AppendEntriesReply{}, err
+		}
+
+		reply.Term = n.persistent.CurrentTerm
+	}
+
 	// later semantics
 	return reply, nil
 }

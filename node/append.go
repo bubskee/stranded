@@ -44,6 +44,17 @@ func (n *Node) processAppendEntries(
 		return reply, nil
 	}
 
+	if len(args.Entries) > 0 {
+		next := n.persistent
+		next.Log = append(append([]LogEntry(nil), n.persistent.Log...), args.Entries...)
+
+		if err := n.storage.Save(next); err != nil {
+			return AppendEntriesReply{}, err
+		}
+
+		n.persistent = next
+	}
+
 	reply.Success = true
 	return reply, nil
 }

@@ -368,3 +368,75 @@ func TestRunAcceptsAppendEntriesWithMatchingPreviousEntry(t *testing.T) {
 		}
 	})
 }
+
+func TestRunAppendsEntryAfterMatchingPrefix(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		storage := &memoryStorage{
+			state: PersistentState{
+				CurrentTerm: 3,
+			},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:         storage,
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		entry := LogEntry{
+			Term:    3,
+			Index:   1,
+			Command: []byte("set x=1"),
+		}
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 0,
+			PrevLogTerm:  0,
+			Entries:      []LogEntry{entry},
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if !reply.Success {
+			t.Fatal("AppendEntries with matching prefix was rejected")
+		}
+
+		n.mu.Lock()
+		gotLog := append([]LogEntry(nil), n.persistent.Log...)
+		n.mu.Unlock()
+
+		if !reflect.DeepEqual(gotLog, []LogEntry{entry}) {
+			t.Errorf("log after AppendEntries: got %+v, want %+v", gotLog, []LogEntry{entry})
+		}
+
+		storage.mu.Lock()
+		persistedLog := append([]LogEntry(nil), storage.state.Log...)
+		storage.mu.Unlock()
+
+		if !reflect.DeepEqual(persistedLog, []LogEntry{entry}) {
+			t.Errorf(
+				"persisted log after AppendEntries: got %+v, want %+v",
+				persistedLog,
+				[]LogEntry{entry},
+			)
+		}
+	})
+}

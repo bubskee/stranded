@@ -281,3 +281,46 @@ func TestRunCurrentTermAppendEntriesStepsCandidateDown(t *testing.T) {
 		}
 	})
 }
+
+func TestRunAcceptsAppendEntriesAtStartOfLog(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 0,
+			PrevLogTerm:  0,
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if reply.Term != 3 {
+			t.Errorf("reply term: got %d, want 3", reply.Term)
+		}
+
+		if !reply.Success {
+			t.Error("AppendEntries at start of log was rejected")
+		}
+	})
+}

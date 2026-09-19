@@ -40,7 +40,11 @@ func (n *Node) processAppendEntries(
 		n.leaderState = nil
 	}
 
-	// later semantics
+	if !n.logMatchesPrevLocked(args) {
+		return reply, nil
+	}
+
+	reply.Success = true
 	return reply, nil
 }
 
@@ -67,4 +71,13 @@ func (n *Node) submitAppendEntries(
 	case <-ctx.Done():
 		return AppendEntriesReply{}, ctx.Err()
 	}
+}
+
+func (n *Node) logMatchesPrevLocked(args AppendEntriesArgs) bool {
+	if args.PrevLogIndex == 0 {
+		return args.PrevLogTerm == 0
+	}
+
+	// later
+	return false
 }

@@ -324,3 +324,47 @@ func TestRunAcceptsAppendEntriesAtStartOfLog(t *testing.T) {
 		}
 	})
 }
+
+func TestRunAcceptsAppendEntriesWithMatchingPreviousEntry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log: []LogEntry{
+					{Term: 1, Index: 1},
+					{Term: 2, Index: 2},
+					{Term: 2, Index: 3},
+				},
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 2,
+			PrevLogTerm:  2,
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if !reply.Success {
+			t.Error("AppendEntries with matching previous entry was rejected")
+		}
+	})
+}

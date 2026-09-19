@@ -78,6 +78,11 @@ func (n *Node) logMatchesPrevLocked(args AppendEntriesArgs) bool {
 		return args.PrevLogTerm == 0
 	}
 
-	// later
+	for _, entry := range n.persistent.Log {
+		if entry.Index == args.PrevLogIndex {
+			return entry.Term == args.PrevLogTerm
+		}
+	}
+
 	return false
 }

@@ -543,3 +543,133 @@ func TestRunFailsDetachedClientsBeforeReturningStorageError(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCancellationFailsPendingClientRequests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		reply := make(chan clientRequestResult, 1)
+
+		n := &Node{
+			cfg: Config{
+				ElectionTimeoutMin: time.Hour,
+				ElectionTimeoutMax: time.Hour,
+			},
+			role: Leader,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+			},
+			leaderState: &LeaderState{
+				NextIndex:  map[PeerID]uint64{},
+				MatchIndex: map[PeerID]uint64{},
+			},
+			pendingClientRequests: map[uint64]chan clientRequestResult{
+				2: reply,
+			},
+			storage: &memoryStorage{},
+		}
+
+		runDone := make(chan error, 1)
+		go func() {
+			runDone <- n.Run(ctx)
+		}()
+
+		synctest.Wait()
+		cancel()
+
+		if err := <-runDone; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error: got %v, want context.Canceled", err)
+		}
+
+		select {
+		case result := <-reply:
+			if result.success {
+				t.Fatal("pending client succeeded on shutdown")
+			}
+		default:
+			t.Fatal("Run exited without resolving pending client")
+		}
+
+		if remaining := len(n.pendingClientRequests); remaining != 0 {
+			t.Errorf("pending requests: got %d, want 0", remaining)
+		}
+	})
+}
+
+func TestRunStorageFailureFailsPendingClientRequests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		saveErr := errors.New("stepdown save failed")
+		reply := make(chan clientRequestResult, 1)
+
+		persistent := PersistentState{
+			CurrentTerm: 3,
+			VotedFor:    "node-a",
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Hour,
+				ElectionTimeoutMax: time.Hour,
+			},
+			role:       Leader,
+			persistent: persistent,
+			leaderState: &LeaderState{
+				NextIndex:  map[PeerID]uint64{},
+				MatchIndex: map[PeerID]uint64{},
+			},
+			storage: &failSecondSaveStorage{
+				state: persistent,
+				saves: 1, // Arm failure on the next Save.
+				err:   saveErr,
+			},
+			pendingClientRequests: map[uint64]chan clientRequestResult{
+				2: reply,
+			},
+			requestVoteCh: make(chan requestVoteCall),
+		}
+
+		runDone := make(chan error, 1)
+		go func() {
+			runDone <- n.Run(ctx)
+		}()
+
+		_, err := n.submitRequestVote(ctx, RequestVoteArgs{
+			Term:        4,
+			CandidateID: "node-b",
+		})
+		if !errors.Is(err, saveErr) {
+			t.Fatalf("request error: got %v, want %v", err, saveErr)
+		}
+
+		if err := <-runDone; !errors.Is(err, saveErr) {
+			t.Fatalf("Run error: got %v, want %v", err, saveErr)
+		}
+
+		// Failed persistence must not publish the stepdown.
+		if n.role != Leader || n.persistent.CurrentTerm != 3 {
+			t.Fatalf(
+				"failed stepdown changed state: role=%v term=%d",
+				n.role,
+				n.persistent.CurrentTerm,
+			)
+		}
+
+		select {
+		case result := <-reply:
+			if result.success {
+				t.Fatal("pending client succeeded after storage failure")
+			}
+		default:
+			t.Fatal("Run exited without resolving pending client")
+		}
+
+		if remaining := len(n.pendingClientRequests); remaining != 0 {
+			t.Errorf("pending requests: got %d, want 0", remaining)
+		}
+	})
+}

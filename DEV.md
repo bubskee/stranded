@@ -77,3 +77,19 @@ Follow the etcd/HashiCorp separation rather than their full machinery. Consensus
 Final stretch for RAFT MVP.
 
 Today's goal: v0 core complete: a 3-node cluster can elect a leader, accept a client command, durably replicate and commit it to a majority, apply it in order, survive leader loss, elect a replacement, and continue.
+
+### Timing: logical ticks with the heartbeat slice
+
+After pending-client cleanup on `Run` exit, introduce logical ticks alongside
+periodic heartbeats. Keep timing decisions serialized in `Run`: one production
+ticker supplies ticks; Raft tracks election and heartbeat elapsed counts, with
+randomized election deadlines. Tests can supply ticks explicitly.
+
+Leaders send periodic AppendEntries without starting elections on their own
+timeout. Role transitions and qualifying RPCs reset the relevant counters.
+Keep this small—no generalized scheduler or `Ready` abstraction. Logical ticks
+do not remove synchronous application backpressure.
+
+First invariant: an idle leader sends periodic AppendEntries and remains leader
+past an election timeout. Explicit ticks will also support the later deterministic
+multi-node failure harness.

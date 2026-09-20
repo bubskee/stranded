@@ -56,6 +56,14 @@ func New(cfg Config) (*Node, error) {
 }
 
 func (n *Node) Run(ctx context.Context) error {
+	defer func() {
+		n.mu.Lock()
+		pending := n.takePendingClientRequestsLocked()
+		n.mu.Unlock()
+
+		failClientRequests(pending)
+	}()
+
 	n.resetElectionTimer()
 
 	voteReplies := make(chan voteReplyEvent)
@@ -93,6 +101,7 @@ func (n *Node) Run(ctx context.Context) error {
 				if err := n.applyCommitted(ctx); err != nil {
 					return err
 				}
+
 				n.completeAppliedClientRequests()
 			}
 

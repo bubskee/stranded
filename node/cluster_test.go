@@ -415,3 +415,109 @@ func TestClusterContinuesAfterLeaderStops(t *testing.T) {
 		}
 	})
 }
+
+func TestClusterWithoutQuorumDoesNotCommitClientCommand(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCluster("node-a", "node-b", "node-c")
+		defer c.stop(t)
+
+		c.advance(t, "node-a", 10)
+		c.advance(t, "node-a", 2)
+
+		leader := c.nodes["node-a"]
+
+		// Establish and consume the committed leader no-op.
+		select {
+		case got := <-leader.applyCh:
+			want := LogEntry{Term: 1, Index: 1}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("initial applied entry: got %+v, want %+v", got, want)
+			}
+		default:
+			t.Fatal("leader did not apply its initial no-op")
+		}
+
+		c.stopNode(t, "node-b")
+		c.stopNode(t, "node-c")
+
+		clientDone := make(chan clientRequestResult, 1)
+		go func() {
+			result, err := leader.submitClientRequest(
+				c.ctx,
+				[]byte("set x=1"),
+			)
+			result.err = err
+			clientDone <- result
+		}()
+
+		synctest.Wait()
+
+		// Cross an election timeout and several heartbeat intervals.
+		c.advance(t, "node-a", 12)
+
+		select {
+		case result := <-clientDone:
+			t.Fatalf("client returned without quorum: %+v", result)
+		default:
+		}
+
+		wantLog := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 1, Index: 2, Command: []byte("set x=1")},
+		}
+
+		persisted, err := leader.storage.Load()
+		if err != nil {
+			t.Fatalf("load leader storage: %v", err)
+		}
+		if !reflect.DeepEqual(persisted.Log, wantLog) {
+			t.Fatalf(
+				"persisted log: got %+v, want %+v",
+				persisted.Log, wantLog,
+			)
+		}
+
+		leader.mu.Lock()
+		role := leader.role
+		term := leader.persistent.CurrentTerm
+		commitIndex := leader.volatile.CommitIndex
+		lastApplied := leader.volatile.LastApplied
+		pending := len(leader.pendingClientRequests)
+		leader.mu.Unlock()
+
+		if role != Leader || term != 1 {
+			t.Errorf("isolated leader: role=%v term=%d, want leader term 1", role, term)
+		}
+		if commitIndex != 1 || lastApplied != 1 {
+			t.Errorf(
+				"without quorum: commit=%d applied=%d, want both 1",
+				commitIndex, lastApplied,
+			)
+		}
+		if pending != 1 {
+			t.Errorf("pending requests: got %d, want 1", pending)
+		}
+
+		select {
+		case got := <-leader.applyCh:
+			t.Fatalf("applied entry without quorum: %+v", got)
+		default:
+		}
+
+		// The client's context stays alive; node shutdown must resolve it.
+		c.stopNode(t, "node-a")
+
+		select {
+		case result := <-clientDone:
+			if result.success {
+				t.Fatal("uncommitted client request succeeded on shutdown")
+			}
+		default:
+			t.Fatal("shutdown did not resolve pending client")
+		}
+
+		if remaining := len(leader.pendingClientRequests); remaining != 0 {
+			t.Errorf("pending requests after shutdown: got %d, want 0", remaining)
+		}
+	})
+}

@@ -571,7 +571,7 @@ func TestHigherTermVoteReplyPersistsFollowerState(t *testing.T) {
 		storage: storage,
 	}
 
-	n.handleVoteReply(
+	_, _ = n.handleVoteReply(
 		"node-b",
 		1,
 		&RequestVoteReply{
@@ -626,7 +626,7 @@ func TestHigherTermVoteReplyPersistenceFailureDoesNotPublishFollowerState(t *tes
 		},
 	}
 
-	err := n.handleVoteReply(
+	_, err := n.handleVoteReply(
 		"node-b",
 		1,
 		&RequestVoteReply{
@@ -999,6 +999,102 @@ func TestRunRequestVotePersistenceFailureDoesNotGrantVote(t *testing.T) {
 			synctest.Wait()
 			<-runErr
 			t.Error("Run did not stop after persistence failure")
+		}
+	})
+}
+
+type leaderHeartbeatTransport struct {
+	mu         sync.Mutex
+	appendArgs map[PeerID]AppendEntriesArgs
+}
+
+func newLeaderHeartbeatTransport() *leaderHeartbeatTransport {
+	return &leaderHeartbeatTransport{
+		appendArgs: make(map[PeerID]AppendEntriesArgs),
+	}
+}
+
+func (t *leaderHeartbeatTransport) RequestVote(
+	ctx context.Context,
+	peer PeerID,
+	args *RequestVoteArgs,
+) (*RequestVoteReply, error) {
+	return &RequestVoteReply{
+		Term:        args.Term,
+		VoteGranted: true,
+	}, nil
+}
+
+func (t *leaderHeartbeatTransport) AppendEntries(
+	ctx context.Context,
+	peer PeerID,
+	args *AppendEntriesArgs,
+) (*AppendEntriesReply, error) {
+	t.mu.Lock()
+	t.appendArgs[peer] = *args
+	t.mu.Unlock()
+
+	return &AppendEntriesReply{
+		Term:    args.Term,
+		Success: true,
+	}, nil
+}
+
+func TestLeaderSendsInitialHeartbeatAfterElection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		transport := newLeaderHeartbeatTransport()
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			transport: transport,
+			storage:   &memoryStorage{},
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		n.mu.Unlock()
+
+		if role != Leader {
+			t.Fatalf("role after election: got %s, want leader", role)
+		}
+
+		transport.mu.Lock()
+		got, ok := transport.appendArgs["node-b"]
+		transport.mu.Unlock()
+
+		if !ok {
+			t.Fatal("leader did not send initial AppendEntries to node-b")
+		}
+
+		want := AppendEntriesArgs{
+			Term:         term,
+			LeaderID:     "node-a",
+			PrevLogIndex: 0,
+			PrevLogTerm:  0,
+			Entries:      nil,
+			LeaderCommit: 0,
+		}
+
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("initial AppendEntries: got %+v, want %+v", got, want)
 		}
 	})
 }

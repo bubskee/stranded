@@ -618,3 +618,191 @@ func TestStaleAppendEntriesDoesNotResetElectionTimer(t *testing.T) {
 		}
 	})
 }
+
+func TestRunAppliesNewlyCommittedEntriesInOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		entry1 := LogEntry{
+			Term:    1,
+			Index:   1,
+			Command: []byte("one"),
+		}
+		entry2 := LogEntry{
+			Term:    2,
+			Index:   2,
+			Command: []byte("two"),
+		}
+		entry3 := LogEntry{
+			Term:    3,
+			Index:   3,
+			Command: []byte("three"),
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log: []LogEntry{
+					entry1,
+					entry2,
+					entry3,
+				},
+			},
+			volatile: VolatileState{
+				CommitIndex: 1,
+				LastApplied: 1,
+			},
+			storage:         &memoryStorage{},
+			applyCh:         make(chan LogEntry, 2),
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 3,
+			PrevLogTerm:  3,
+			LeaderCommit: 3,
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if !reply.Success {
+			t.Fatal("AppendEntries was rejected")
+		}
+
+		got2 := <-n.applyCh
+		got3 := <-n.applyCh
+
+		if !reflect.DeepEqual(got2, entry2) {
+			t.Errorf("first applied entry: got %+v, want %+v", got2, entry2)
+		}
+
+		if !reflect.DeepEqual(got3, entry3) {
+			t.Errorf("second applied entry: got %+v, want %+v", got3, entry3)
+		}
+
+		n.mu.Lock()
+		lastApplied := n.volatile.LastApplied
+		n.mu.Unlock()
+
+		if lastApplied != 3 {
+			t.Errorf("last applied: got %d, want 3", lastApplied)
+		}
+	})
+}
+
+func TestRunDoesNotApplyCommittedEntryTwice(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		entry1 := LogEntry{
+			Term:    1,
+			Index:   1,
+			Command: []byte("one"),
+		}
+		entry2 := LogEntry{
+			Term:    2,
+			Index:   2,
+			Command: []byte("two"),
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 2,
+				Log: []LogEntry{
+					entry1,
+					entry2,
+				},
+			},
+			volatile: VolatileState{
+				CommitIndex: 1,
+				LastApplied: 1,
+			},
+			storage:         &memoryStorage{},
+			applyCh:         make(chan LogEntry, 2),
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		firstReply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         2,
+			LeaderID:     "node-b",
+			PrevLogIndex: 2,
+			PrevLogTerm:  2,
+			LeaderCommit: 2,
+		})
+		if err != nil {
+			t.Fatalf("first AppendEntries: %v", err)
+		}
+
+		if !firstReply.Success {
+			t.Fatal("first AppendEntries was rejected")
+		}
+
+		select {
+		case got := <-n.applyCh:
+			if !reflect.DeepEqual(got, entry2) {
+				t.Errorf("first applied entry: got %+v, want %+v", got, entry2)
+			}
+		default:
+			t.Fatal("entry 2 was not applied")
+		}
+
+		secondReply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         2,
+			LeaderID:     "node-b",
+			PrevLogIndex: 2,
+			PrevLogTerm:  2,
+			LeaderCommit: 2,
+		})
+		if err != nil {
+			t.Fatalf("second AppendEntries: %v", err)
+		}
+
+		if !secondReply.Success {
+			t.Fatal("second AppendEntries was rejected")
+		}
+
+		select {
+		case got := <-n.applyCh:
+			t.Fatalf("entry applied twice: got %+v", got)
+		default:
+		}
+
+		n.mu.Lock()
+		commitIndex := n.volatile.CommitIndex
+		lastApplied := n.volatile.LastApplied
+		n.mu.Unlock()
+
+		if commitIndex != 2 {
+			t.Errorf("commit index: got %d, want 2", commitIndex)
+		}
+
+		if lastApplied != 2 {
+			t.Errorf("last applied: got %d, want 2", lastApplied)
+		}
+	})
+}

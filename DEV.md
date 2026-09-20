@@ -67,3 +67,7 @@ For `stranded`, follow the HashiCorp-style boundary at the smallest useful scale
 * `LastApplied` advances only after successful application handoff, never merely when `CommitIndex` advances.
 * For now, application handoff may synchronously backpressure `Run`. Do not introduce a larger Ready/Advance or dedicated-applier abstraction until tests demonstrate that this matters for liveness or ordering.
 * If that pressure appears, the natural next step is a dedicated ordered applier/ack path rather than allowing state-machine work to run under the Raft mutex.
+
+### Leader transition / outbound work: 
+
+Follow the etcd/HashiCorp separation rather than their full machinery. Consensus transitions, including processing vote replies and becoming leader, should be serialized through Run. Becoming leader initializes leader replication state but performs no network I/O while holding Raft state. After the transition, Run schedules outbound AppendEntries work. Start with the paper’s initial empty heartbeat; when general leader-side log replication exists, add the current-term no-op entry used by mature implementations to establish commitment in the new term.

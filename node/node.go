@@ -55,16 +55,28 @@ func New(cfg Config) (*Node, error) {
 func (n *Node) Run(ctx context.Context) error {
 	n.resetElectionTimer()
 
-	errCh := make(chan error, 1)
+	voteReplies := make(chan voteReplyEvent)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 
-		case err := <-errCh:
-			return err
+		case event := <-voteReplies:
+			becameLeader, err := n.handleVoteReply(
+				event.peer,
+				event.electionTerm,
+				&event.reply,
+			)
+			if err != nil {
+				return err
+			}
 
+			if becameLeader {
+				n.sendInitialHeartbeats(ctx)
+			}
+
+		// RequestVote case
 		case call := <-n.requestVoteCh:
 			reply, err := n.processRequestVote(call.args)
 
@@ -81,6 +93,7 @@ func (n *Node) Run(ctx context.Context) error {
 				return err
 			}
 
+		// AppendEntries case
 		case call := <-n.appendEntriesCh:
 			reply, err := n.processAppendEntries(call.args)
 
@@ -108,7 +121,7 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 			n.resetElectionTimer()
-			n.sendRequestVotes(ctx, e, errCh)
+			n.sendRequestVotes(ctx, e, voteReplies)
 		}
 	}
 }

@@ -17,6 +17,12 @@ type requestVoteResult struct {
 	err   error
 }
 
+type voteReplyEvent struct {
+	peer         PeerID
+	electionTerm uint64
+	reply        RequestVoteReply
+}
+
 func (n *Node) startElection() (election, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -65,17 +71,10 @@ func (n *Node) startElection() (election, error) {
 func (n *Node) sendRequestVotes(
 	ctx context.Context,
 	e election,
-	errCh chan<- error,
+	replies chan<- voteReplyEvent,
 ) {
 	for peer := range n.cfg.Peers {
-		go func(peer PeerID) {
-			if err := n.requestVote(ctx, peer, e); err != nil {
-				select {
-				case errCh <- err:
-				case <-ctx.Done():
-				}
-			}
-		}(peer)
+		go n.requestVote(ctx, peer, e, replies)
 	}
 }
 
@@ -83,47 +82,56 @@ func (n *Node) requestVote(
 	ctx context.Context,
 	peer PeerID,
 	e election,
-) error {
+	replies chan<- voteReplyEvent,
+) {
 	reply, err := n.transport.RequestVote(ctx, peer, &e.args)
 	if err != nil {
-		// An unavailable peer is ordinary Raft behavior, not a node failure.
-		return nil
+		// An unavailable peer is ordinary Raft behavior.
+		return
 	}
 
-	return n.handleVoteReply(peer, e.term, reply)
+	select {
+	case replies <- voteReplyEvent{
+		peer:         peer,
+		electionTerm: e.term,
+		reply:        *reply,
+	}:
+	case <-ctx.Done():
+	}
 }
 
 func (n *Node) handleVoteReply(
 	peer PeerID,
 	electionTerm uint64,
 	reply *RequestVoteReply,
-) error {
+) (bool, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if reply.Term > n.persistent.CurrentTerm {
-		return n.becomeFollowerLocked(reply.Term)
+		return false, n.becomeFollowerLocked(reply.Term)
 	}
 
 	if n.role != Candidate || n.persistent.CurrentTerm != electionTerm {
-		return nil
+		return false, nil
 	}
 
 	if reply.Term < electionTerm {
-		return nil
+		return false, nil
 	}
 
 	if _, seen := n.candidateState.Votes[peer]; seen {
-		return nil
+		return false, nil
 	}
 
 	n.candidateState.Votes[peer] = reply.VoteGranted
 
 	if n.hasElectionQuorumLocked() {
 		n.becomeLeaderLocked()
+		return true, nil
 	}
 
-	return nil
+	return false, nil
 }
 
 func (n *Node) hasElectionQuorumLocked() bool {

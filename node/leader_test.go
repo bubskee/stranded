@@ -428,7 +428,7 @@ func TestStaleAppendEntriesRejectionDoesNotRegressFollowerProgress(t *testing.T)
 	// This rejection belongs to an older RPC that was sent when
 	// node-b's NextIndex was still 3. Since then, newer replication
 	// has advanced it to 6.
-	retry, err := n.handleAppendEntriesReply(appendReplyEvent{
+	result, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:      "node-b",
 		sentTerm:  3,
 		nextIndex: 3,
@@ -441,7 +441,7 @@ func TestStaleAppendEntriesRejectionDoesNotRegressFollowerProgress(t *testing.T)
 		t.Fatalf("stale AppendEntries rejection: %v", err)
 	}
 
-	if retry.commitAdvanced {
+	if result.retry {
 		t.Fatal("stale AppendEntries rejection requested a retry")
 	}
 

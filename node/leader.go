@@ -138,7 +138,45 @@ func (n *Node) handleAppendEntriesReply(
 	if event.matchIndex > n.leaderState.MatchIndex[event.peer] {
 		n.leaderState.MatchIndex[event.peer] = event.matchIndex
 		n.leaderState.NextIndex[event.peer] = event.matchIndex + 1
+
+		n.advanceLeaderCommitLocked()
 	}
 
 	return false, nil
+}
+
+func (n *Node) advanceLeaderCommitLocked() {
+	current := n.volatile.CommitIndex
+	currentTerm := n.persistent.CurrentTerm
+
+	clusterSize := len(n.cfg.Peers) + 1
+	quorum := clusterSize/2 + 1
+
+	next := current
+
+	for _, entry := range n.persistent.Log {
+		if entry.Index <= current {
+			continue
+		}
+
+		// Raft §5.4.2: only directly advance commitIndex using
+		// replica counts for entries from the leader's current term.
+		if entry.Term != currentTerm {
+			continue
+		}
+
+		replicated := 1 // the leader itself
+
+		for peer := range n.cfg.Peers {
+			if n.leaderState.MatchIndex[peer] >= entry.Index {
+				replicated++
+			}
+		}
+
+		if replicated >= quorum && entry.Index > next {
+			next = entry.Index
+		}
+	}
+
+	n.volatile.CommitIndex = next
 }

@@ -398,3 +398,170 @@ func TestFailedAppendEntriesBacksUpAndRetries(t *testing.T) {
 		}
 	})
 }
+
+func TestStaleAppendEntriesRejectionDoesNotRegressFollowerProgress(t *testing.T) {
+	n := &Node{
+		role: Leader,
+		persistent: PersistentState{
+			CurrentTerm: 3,
+		},
+		leaderState: &LeaderState{
+			MatchIndex: map[PeerID]uint64{
+				"node-b": 5,
+			},
+			NextIndex: map[PeerID]uint64{
+				"node-b": 6,
+			},
+		},
+		storage: &memoryStorage{},
+	}
+
+	// This rejection belongs to an older RPC that was sent when
+	// node-b's NextIndex was still 3. Since then, newer replication
+	// has advanced it to 6.
+	retry, err := n.handleAppendEntriesReply(appendReplyEvent{
+		peer:      "node-b",
+		sentTerm:  3,
+		nextIndex: 3,
+		reply: AppendEntriesReply{
+			Term:    3,
+			Success: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("stale AppendEntries rejection: %v", err)
+	}
+
+	if retry {
+		t.Fatal("stale AppendEntries rejection requested a retry")
+	}
+
+	n.mu.Lock()
+	matchIndex := n.leaderState.MatchIndex["node-b"]
+	nextIndex := n.leaderState.NextIndex["node-b"]
+	n.mu.Unlock()
+
+	if matchIndex != 5 {
+		t.Errorf("match index changed after stale rejection: got %d, want 5", matchIndex)
+	}
+
+	if nextIndex != 6 {
+		t.Errorf("next index regressed after stale rejection: got %d, want 6", nextIndex)
+	}
+}
+
+func TestSuccessfulAppendEntriesReplyAdvancesLeaderCommitIndex(t *testing.T) {
+	n := &Node{
+		cfg: Config{
+			ID: "node-a",
+			Peers: map[PeerID]string{
+				"node-b": "",
+				"node-c": "",
+			},
+		},
+		role: Leader,
+		persistent: PersistentState{
+			CurrentTerm: 3,
+			Log: []LogEntry{
+				{Term: 2, Index: 1},
+				{Term: 3, Index: 2},
+			},
+		},
+		volatile: VolatileState{
+			CommitIndex: 0,
+		},
+		leaderState: &LeaderState{
+			MatchIndex: map[PeerID]uint64{
+				"node-b": 0,
+				"node-c": 0,
+			},
+			NextIndex: map[PeerID]uint64{
+				"node-b": 1,
+				"node-c": 1,
+			},
+		},
+		storage: &memoryStorage{},
+	}
+
+	_, err := n.handleAppendEntriesReply(appendReplyEvent{
+		peer:       "node-b",
+		sentTerm:   3,
+		nextIndex:  1,
+		matchIndex: 2,
+		reply: AppendEntriesReply{
+			Term:    3,
+			Success: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("successful AppendEntries reply: %v", err)
+	}
+
+	n.mu.Lock()
+	matchIndex := n.leaderState.MatchIndex["node-b"]
+	commitIndex := n.volatile.CommitIndex
+	n.mu.Unlock()
+
+	if matchIndex != 2 {
+		t.Errorf("match index: got %d, want 2", matchIndex)
+	}
+
+	if commitIndex != 2 {
+		t.Errorf("commit index: got %d, want 2", commitIndex)
+	}
+}
+
+func TestLeaderDoesNotCommitOldTermEntryFromReplicaCountAlone(t *testing.T) {
+	n := &Node{
+		cfg: Config{
+			ID: "node-a",
+			Peers: map[PeerID]string{
+				"node-b": "",
+				"node-c": "",
+			},
+		},
+		role: Leader,
+		persistent: PersistentState{
+			CurrentTerm: 3,
+			Log: []LogEntry{
+				{Term: 2, Index: 1},
+			},
+		},
+		leaderState: &LeaderState{
+			MatchIndex: map[PeerID]uint64{
+				"node-b": 0,
+				"node-c": 0,
+			},
+			NextIndex: map[PeerID]uint64{
+				"node-b": 1,
+				"node-c": 1,
+			},
+		},
+		storage: &memoryStorage{},
+	}
+
+	_, err := n.handleAppendEntriesReply(appendReplyEvent{
+		peer:       "node-b",
+		sentTerm:   3,
+		nextIndex:  1,
+		matchIndex: 1,
+		reply: AppendEntriesReply{
+			Term:    3,
+			Success: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("successful AppendEntries reply: %v", err)
+	}
+
+	n.mu.Lock()
+	commitIndex := n.volatile.CommitIndex
+	n.mu.Unlock()
+
+	if commitIndex != 0 {
+		t.Errorf(
+			"old-term entry committed from replica count alone: got %d, want 0",
+			commitIndex,
+		)
+	}
+}

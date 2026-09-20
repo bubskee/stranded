@@ -90,3 +90,79 @@ func TestHigherTermAppendEntriesReplyStepsDownLeader(t *testing.T) {
 		}
 	})
 }
+
+type successfulAppendReplyTransport struct{}
+
+func (successfulAppendReplyTransport) RequestVote(
+	ctx context.Context,
+	peer PeerID,
+	args *RequestVoteArgs,
+) (*RequestVoteReply, error) {
+	return &RequestVoteReply{
+		Term:        args.Term,
+		VoteGranted: true,
+	}, nil
+}
+
+func (successfulAppendReplyTransport) AppendEntries(
+	ctx context.Context,
+	peer PeerID,
+	args *AppendEntriesArgs,
+) (*AppendEntriesReply, error) {
+	return &AppendEntriesReply{
+		Term:    args.Term,
+		Success: true,
+	}, nil
+}
+
+func TestSuccessfulAppendEntriesReplyAdvancesFollowerProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			persistent: PersistentState{
+				CurrentTerm: 1,
+				Log: []LogEntry{
+					{Term: 1, Index: 1},
+					{Term: 1, Index: 2},
+				},
+			},
+			transport: successfulAppendReplyTransport{},
+			storage:   &memoryStorage{},
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		matchIndex := n.leaderState.MatchIndex["node-b"]
+		nextIndex := n.leaderState.NextIndex["node-b"]
+		n.mu.Unlock()
+
+		if role != Leader {
+			t.Fatalf("role after election: got %s, want leader", role)
+		}
+
+		if matchIndex != 2 {
+			t.Errorf("match index after successful AppendEntries: got %d, want 2", matchIndex)
+		}
+
+		if nextIndex != 3 {
+			t.Errorf("next index after successful AppendEntries: got %d, want 3", nextIndex)
+		}
+	})
+}

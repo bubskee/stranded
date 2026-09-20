@@ -3,9 +3,10 @@ package node
 import "context"
 
 type appendReplyEvent struct {
-	peer     PeerID
-	sentTerm uint64
-	reply    AppendEntriesReply
+	peer       PeerID
+	sentTerm   uint64
+	matchIndex uint64
+	reply      AppendEntriesReply
 }
 
 func (n *Node) sendInitialHeartbeats(
@@ -61,11 +62,17 @@ func (n *Node) sendHeartbeat(
 		return
 	}
 
+	matchIndex := args.PrevLogIndex
+	if len(args.Entries) > 0 {
+		matchIndex = args.Entries[len(args.Entries)-1].Index
+	}
+
 	select {
 	case replies <- appendReplyEvent{
-		peer:     peer,
-		sentTerm: args.Term,
-		reply:    *reply,
+		peer:       peer,
+		sentTerm:   args.Term,
+		matchIndex: matchIndex,
+		reply:      *reply,
 	}:
 	case <-ctx.Done():
 	}
@@ -81,6 +88,22 @@ func (n *Node) handleAppendEntriesReply(
 		return n.becomeFollowerLocked(event.reply.Term)
 	}
 
-	// The rest of leader replication semantics come next.
+	// Ignore replies to an obsolete leadership term.
+	if n.role != Leader ||
+		event.sentTerm != n.persistent.CurrentTerm ||
+		event.reply.Term < n.persistent.CurrentTerm {
+		return nil
+	}
+
+	if !event.reply.Success {
+		// Retry/backtracking comes next.
+		return nil
+	}
+
+	if event.matchIndex > n.leaderState.MatchIndex[event.peer] {
+		n.leaderState.MatchIndex[event.peer] = event.matchIndex
+		n.leaderState.NextIndex[event.peer] = event.matchIndex + 1
+	}
+
 	return nil
 }

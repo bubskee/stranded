@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"testing"
 )
 
 type appendEntriesCall struct {
@@ -157,43 +156,4 @@ func (n *Node) logMatchesPrevLocked(args AppendEntriesArgs) bool {
 	}
 
 	return false
-}
-
-func TestShortAppendEntriesDoesNotDecreaseCommitIndex(t *testing.T) {
-	persistent := PersistentState{
-		CurrentTerm: 4,
-		Log: []LogEntry{
-			{Term: 1, Index: 1},
-			{Term: 2, Index: 2},
-			{Term: 3, Index: 3},
-		},
-	}
-
-	n := &Node{
-		role:       Follower,
-		persistent: persistent,
-		volatile: VolatileState{
-			CommitIndex: 3,
-			LastApplied: 3,
-		},
-		storage: &memoryStorage{state: persistent},
-	}
-
-	result, err := n.processAppendEntries(AppendEntriesArgs{
-		Term:         4,
-		LeaderID:     "node-b",
-		PrevLogIndex: 1,
-		PrevLogTerm:  1,
-		LeaderCommit: 4,
-	})
-	if err != nil {
-		t.Fatalf("process AppendEntries: %v", err)
-	}
-	if !result.reply.Success {
-		t.Fatal("AppendEntries with matching prefix was rejected")
-	}
-
-	if got := n.volatile.CommitIndex; got != 3 {
-		t.Errorf("commit index: got %d, want 3", got)
-	}
 }

@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"errors"
-	"math/rand/v2"
 	"os"
 	"sync"
 	"time"
@@ -26,7 +25,6 @@ type Node struct {
 	heartbeatElapsed        int
 	randomizedElectionTicks int
 
-	electionTimer         *time.Timer
 	pendingClientRequests map[uint64]chan clientRequestResult
 
 	applyCh         chan LogEntry
@@ -216,21 +214,4 @@ func (n *Node) run(ctx context.Context, ticks <-chan time.Time) error {
 			}
 		}
 	}
-}
-
-func (n *Node) resetElectionTimer() {
-	min := n.cfg.ElectionTimeoutMin
-	max := n.cfg.ElectionTimeoutMax
-
-	timeout := min
-	if max > min {
-		timeout += rand.N(max - min)
-	}
-
-	if n.electionTimer == nil {
-		n.electionTimer = time.NewTimer(timeout)
-		return
-	}
-
-	n.electionTimer.Reset(timeout)
 }

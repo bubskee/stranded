@@ -1,6 +1,9 @@
 package node
 
-import "context"
+import (
+	"context"
+	"testing"
+)
 
 type appendEntriesCall struct {
 	args  AppendEntriesArgs
@@ -103,19 +106,14 @@ func (n *Node) processAppendEntries(
 		}
 	}
 
-	if args.LeaderCommit > n.volatile.CommitIndex {
-		lastIndex := uint64(0)
-		for _, entry := range n.persistent.Log {
-			if entry.Index > lastIndex {
-				lastIndex = entry.Index
-			}
-		}
+	matchedIndex := args.PrevLogIndex
+	if len(args.Entries) > 0 {
+		matchedIndex = args.Entries[len(args.Entries)-1].Index
+	}
 
-		if args.LeaderCommit < lastIndex {
-			n.volatile.CommitIndex = args.LeaderCommit
-		} else {
-			n.volatile.CommitIndex = lastIndex
-		}
+	commitIndex := min(args.LeaderCommit, matchedIndex)
+	if commitIndex > n.volatile.CommitIndex {
+		n.volatile.CommitIndex = commitIndex
 	}
 
 	result.reply.Success = true
@@ -159,4 +157,43 @@ func (n *Node) logMatchesPrevLocked(args AppendEntriesArgs) bool {
 	}
 
 	return false
+}
+
+func TestShortAppendEntriesDoesNotDecreaseCommitIndex(t *testing.T) {
+	persistent := PersistentState{
+		CurrentTerm: 4,
+		Log: []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 2, Index: 2},
+			{Term: 3, Index: 3},
+		},
+	}
+
+	n := &Node{
+		role:       Follower,
+		persistent: persistent,
+		volatile: VolatileState{
+			CommitIndex: 3,
+			LastApplied: 3,
+		},
+		storage: &memoryStorage{state: persistent},
+	}
+
+	result, err := n.processAppendEntries(AppendEntriesArgs{
+		Term:         4,
+		LeaderID:     "node-b",
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		LeaderCommit: 4,
+	})
+	if err != nil {
+		t.Fatalf("process AppendEntries: %v", err)
+	}
+	if !result.reply.Success {
+		t.Fatal("AppendEntries with matching prefix was rejected")
+	}
+
+	if got := n.volatile.CommitIndex; got != 3 {
+		t.Errorf("commit index: got %d, want 3", got)
+	}
 }

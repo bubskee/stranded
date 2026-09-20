@@ -953,3 +953,42 @@ func TestRunAppliesNewlyCommittedEntry(t *testing.T) {
 		}
 	})
 }
+
+func TestAppendEntriesDoesNotCommitUnmatchedSuffix(t *testing.T) {
+	persistent := PersistentState{
+		CurrentTerm: 4,
+		Log: []LogEntry{
+			{Term: 1, Index: 1, Command: []byte("shared")},
+			{Term: 2, Index: 2, Command: []byte("old-two")},
+			{Term: 2, Index: 3, Command: []byte("old-three")},
+		},
+	}
+
+	n := &Node{
+		role:       Follower,
+		persistent: persistent,
+		storage:    &memoryStorage{state: persistent},
+	}
+
+	result, err := n.processAppendEntries(AppendEntriesArgs{
+		Term:         4,
+		LeaderID:     "node-b",
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		LeaderCommit: 3,
+	})
+	if err != nil {
+		t.Fatalf("process AppendEntries: %v", err)
+	}
+	if !result.reply.Success {
+		t.Fatal("AppendEntries with matching prefix was rejected")
+	}
+
+	if got := n.volatile.CommitIndex; got != 1 {
+		t.Errorf("commit index: got %d, want 1", got)
+	}
+
+	if !reflect.DeepEqual(n.persistent.Log, persistent.Log) {
+		t.Fatal("empty AppendEntries changed the local log")
+	}
+}

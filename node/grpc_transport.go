@@ -16,7 +16,7 @@ type grpcTransport struct {
 // newGRPCTransport takes already-dialed clients rather than dialing itself,
 // so construction/connection-lifecycle concerns stay in cmd/node/main.go
 // and this type stays purely about the request/response translation.
-func newGRPCTransport(clients map[PeerID]raftpb.RaftServiceClient) *grpcTransport {
+func NewGRPCTransport(clients map[PeerID]raftpb.RaftServiceClient) *grpcTransport {
 	return &grpcTransport{clients: clients}
 }
 

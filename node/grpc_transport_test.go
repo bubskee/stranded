@@ -55,7 +55,7 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 		},
 	}
 
-	transport := newGRPCTransport(map[PeerID]raftpb.RaftServiceClient{
+	transport := NewGRPCTransport(map[PeerID]raftpb.RaftServiceClient{
 		"node-b": client,
 	})
 

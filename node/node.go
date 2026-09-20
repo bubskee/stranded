@@ -215,3 +215,13 @@ func (n *Node) run(ctx context.Context, ticks <-chan time.Time) error {
 		}
 	}
 }
+
+func NewWithTransport(cfg Config, transport Transport) (*Node, error) {
+	n, err := New(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	n.transport = transport
+	return n, nil
+}

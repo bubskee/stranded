@@ -79,3 +79,7 @@ func (s *grpcServer) SubmitCommand(
 		LeaderHint: string(result.leaderHint),
 	}, nil
 }
+
+func NewGRPCServer(n *Node) raftpb.RaftServiceServer {
+	return &grpcServer{node: n}
+}

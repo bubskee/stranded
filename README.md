@@ -60,6 +60,16 @@ The node process exposes Raft and command submission over gRPC. There is no inte
 
 See [DEV.md](DEV.md) for the implementation diary, design decisions, prior-art notes, and the original v0 milestone.
 
+## Correctness invariants exercised
+
+Tests cover several Raft failure and concurrency invariants, including:
+
+- durable-before-visible state transitions;
+- current-term-only leader commit advancement;
+- stale RPC replies not regressing replication progress;
+- no client success or application without quorum;
+- divergent uncommitted suffix repair after partition healing.
+
 ## Scope and assumptions
 
 `stranded` is an educational implementation, not a production Raft library. In particular:
@@ -70,6 +80,8 @@ See [DEV.md](DEV.md) for the implementation diary, design decisions, prior-art n
 * Application handoff is synchronous. Client success means the committed entry reached the application channel, not that an arbitrary external side effect is durable.
 * Restart restores persisted term, vote, and log state; replay assumes a fresh application. The application state itself is not persisted by Raft.
 * Client request deduplication / exactly-once semantics, snapshots, membership changes, and power-loss fault injection are outside v0.1.
+* Outbound RPCs use independent goroutines with node-lifetime contexts; v0.1 does not implement per-peer replication workers, RPC deadlines, or pipelining.
+* The protobuf includes fields for conflict hints, client request identity, and leader hints that are reserved for post-v0 behavior and are not currently used.
 
 The command-line process also uses plaintext gRPC; authentication, TLS, operational hardening, and production observability are deliberately out of scope.
 

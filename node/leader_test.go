@@ -188,7 +188,7 @@ func TestSuccessfulAppendEntriesReplyDoesNotRegressFollowerProgress(t *testing.T
 	}
 
 	// A newer RPC proves replication through index 5.
-	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		matchIndex: 5,
@@ -202,7 +202,7 @@ func TestSuccessfulAppendEntriesReplyDoesNotRegressFollowerProgress(t *testing.T
 	}
 
 	// Then an older in-flight RPC arrives late and only proves index 3.
-	_, _, err = n.handleAppendEntriesReply(appendReplyEvent{
+	_, err = n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		matchIndex: 3,
@@ -246,7 +246,7 @@ func TestStaleTermAppendEntriesReplyDoesNotMutateFollowerProgress(t *testing.T) 
 		storage: &memoryStorage{},
 	}
 
-	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		matchIndex: 9,
@@ -428,7 +428,7 @@ func TestStaleAppendEntriesRejectionDoesNotRegressFollowerProgress(t *testing.T)
 	// This rejection belongs to an older RPC that was sent when
 	// node-b's NextIndex was still 3. Since then, newer replication
 	// has advanced it to 6.
-	retry, _, err := n.handleAppendEntriesReply(appendReplyEvent{
+	retry, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:      "node-b",
 		sentTerm:  3,
 		nextIndex: 3,
@@ -441,7 +441,7 @@ func TestStaleAppendEntriesRejectionDoesNotRegressFollowerProgress(t *testing.T)
 		t.Fatalf("stale AppendEntries rejection: %v", err)
 	}
 
-	if retry {
+	if retry.commitAdvanced {
 		t.Fatal("stale AppendEntries rejection requested a retry")
 	}
 
@@ -492,7 +492,7 @@ func TestSuccessfulAppendEntriesReplyAdvancesLeaderCommitIndex(t *testing.T) {
 		storage: &memoryStorage{},
 	}
 
-	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		nextIndex:  1,
@@ -549,7 +549,7 @@ func TestLeaderDoesNotCommitOldTermEntryFromReplicaCountAlone(t *testing.T) {
 		storage: &memoryStorage{},
 	}
 
-	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		nextIndex:  1,
@@ -654,34 +654,6 @@ func TestLeaderAppendsCurrentTermNoOpOnElection(t *testing.T) {
 			)
 		}
 	})
-}
-
-type failSecondSaveStorage struct {
-	mu    sync.Mutex
-	state PersistentState
-	saves int
-	err   error
-}
-
-func (s *failSecondSaveStorage) Load() (PersistentState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.state, nil
-}
-
-func (s *failSecondSaveStorage) Save(state PersistentState) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.saves++
-
-	if s.saves == 2 {
-		return s.err
-	}
-
-	s.state = state
-	return nil
 }
 
 func TestLeaderNoOpPersistenceFailurePreventsBecomingLeader(t *testing.T) {

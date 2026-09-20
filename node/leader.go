@@ -10,6 +10,12 @@ type appendReplyEvent struct {
 	reply      AppendEntriesReply
 }
 
+type appendReplyResult struct {
+	retry          bool
+	commitAdvanced bool
+	failedClients  []chan clientRequestResult
+}
+
 func (n *Node) sendAppendEntriesToAll(
 	ctx context.Context,
 	replies chan<- appendReplyEvent,
@@ -105,43 +111,54 @@ func (n *Node) callAppendEntries(
 
 func (n *Node) handleAppendEntriesReply(
 	event appendReplyEvent,
-) (retry bool, commitAdvanced bool, err error) {
+) (appendReplyResult, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if event.reply.Term > n.persistent.CurrentTerm {
-		return false, false, n.becomeFollowerLocked(event.reply.Term)
+		pending, err := n.becomeFollowerLocked(event.reply.Term)
+		if err != nil {
+			return appendReplyResult{}, err
+		}
+
+		return appendReplyResult{
+			failedClients: pending,
+		}, nil
 	}
 
 	if n.role != Leader ||
 		event.sentTerm != n.persistent.CurrentTerm ||
 		event.reply.Term < n.persistent.CurrentTerm {
-		return false, false, nil
+		return appendReplyResult{}, nil
 	}
 
 	if !event.reply.Success {
 		currentNext := n.leaderState.NextIndex[event.peer]
 
 		if event.nextIndex != currentNext {
-			return false, false, nil
+			return appendReplyResult{}, nil
 		}
 
 		if currentNext <= 1 {
-			return false, false, nil
+			return appendReplyResult{}, nil
 		}
 
 		n.leaderState.NextIndex[event.peer] = currentNext - 1
-		return true, false, nil
+		return appendReplyResult{
+			retry: true,
+		}, nil
 	}
+
+	var result appendReplyResult
 
 	if event.matchIndex > n.leaderState.MatchIndex[event.peer] {
 		n.leaderState.MatchIndex[event.peer] = event.matchIndex
 		n.leaderState.NextIndex[event.peer] = event.matchIndex + 1
 
-		commitAdvanced = n.advanceLeaderCommitLocked()
+		result.commitAdvanced = n.advanceLeaderCommitLocked()
 	}
 
-	return false, commitAdvanced, nil
+	return result, nil
 }
 
 func (n *Node) advanceLeaderCommitLocked() bool {

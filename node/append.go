@@ -12,26 +12,35 @@ type appendEntriesResult struct {
 	err   error
 }
 
+type appendEntriesProcessResult struct {
+	reply         AppendEntriesReply
+	failedClients []chan clientRequestResult
+}
+
 func (n *Node) processAppendEntries(
 	args AppendEntriesArgs,
-) (AppendEntriesReply, error) {
+) (appendEntriesProcessResult, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	reply := AppendEntriesReply{
-		Term: n.persistent.CurrentTerm,
+	result := appendEntriesProcessResult{
+		reply: AppendEntriesReply{
+			Term: n.persistent.CurrentTerm,
+		},
 	}
 
 	if args.Term < n.persistent.CurrentTerm {
-		return reply, nil
+		return result, nil
 	}
 
 	if args.Term > n.persistent.CurrentTerm {
-		if err := n.becomeFollowerLocked(args.Term); err != nil {
-			return AppendEntriesReply{}, err
+		pending, err := n.becomeFollowerLocked(args.Term)
+		if err != nil {
+			return result, err
 		}
 
-		reply.Term = n.persistent.CurrentTerm
+		result.failedClients = pending
+		result.reply.Term = n.persistent.CurrentTerm
 	}
 
 	if args.Term == n.persistent.CurrentTerm && n.role == Candidate {
@@ -41,7 +50,7 @@ func (n *Node) processAppendEntries(
 	}
 
 	if !n.logMatchesPrevLocked(args) {
-		return reply, nil
+		return result, nil
 	}
 
 	if len(args.Entries) > 0 {
@@ -87,7 +96,7 @@ func (n *Node) processAppendEntries(
 
 		if changed {
 			if err := n.storage.Save(next); err != nil {
-				return AppendEntriesReply{}, err
+				return result, err
 			}
 
 			n.persistent = next
@@ -109,8 +118,8 @@ func (n *Node) processAppendEntries(
 		}
 	}
 
-	reply.Success = true
-	return reply, nil
+	result.reply.Success = true
+	return result, nil
 }
 
 func (n *Node) submitAppendEntries(

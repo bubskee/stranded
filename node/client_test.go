@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"testing/synctest"
@@ -255,4 +256,290 @@ func TestLeaderClientRequestPersistsReplicatesAndWaitsForCommit(t *testing.T) {
 			t.Errorf("last applied: got %d, want 2", lastApplied)
 		}
 	})
+}
+
+func TestStepdownDetachesPendingClientRequests(t *testing.T) {
+	reply := make(chan clientRequestResult, 1)
+
+	n := &Node{
+		role: Leader,
+		persistent: PersistentState{
+			CurrentTerm: 3,
+		},
+		leaderState: &LeaderState{
+			NextIndex:  map[PeerID]uint64{},
+			MatchIndex: map[PeerID]uint64{},
+		},
+		pendingClientRequests: map[uint64]chan clientRequestResult{
+			2: reply,
+		},
+		storage: &memoryStorage{},
+	}
+
+	n.mu.Lock()
+	detached, err := n.becomeFollowerLocked(4)
+	remaining := len(n.pendingClientRequests)
+	n.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("become follower: %v", err)
+	}
+
+	if len(detached) != 1 {
+		t.Fatalf("detached requests: got %d, want 1", len(detached))
+	}
+
+	if detached[0] != reply {
+		t.Fatal("detached the wrong client waiter")
+	}
+
+	if remaining != 0 {
+		t.Errorf("pending requests: got %d, want 0", remaining)
+	}
+
+	select {
+	case result := <-reply:
+		t.Fatalf("stepdown notified client before explicit completion: %+v", result)
+	default:
+	}
+
+	failClientRequests(detached)
+
+	select {
+	case result := <-reply:
+		if result.success {
+			t.Fatal("pending request succeeded after leadership loss")
+		}
+	default:
+		t.Fatal("detached client request was not failed")
+	}
+}
+
+func TestRunFailsPendingClientsOnHigherTermRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		request func(context.Context, *Node) (bool, error)
+	}{
+		{
+			name: "RequestVote with stale log",
+			request: func(ctx context.Context, n *Node) (bool, error) {
+				reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
+					Term:         4,
+					CandidateID:  "node-b",
+					LastLogIndex: 0,
+					LastLogTerm:  0,
+				})
+				return reply.VoteGranted, err
+			},
+		},
+		{
+			name: "AppendEntries with log mismatch",
+			request: func(ctx context.Context, n *Node) (bool, error) {
+				reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+					Term:         4,
+					LeaderID:     "node-b",
+					PrevLogIndex: 2,
+					PrevLogTerm:  2,
+				})
+				return reply.Success, err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				clientReply := make(chan clientRequestResult, 1)
+
+				persistent := PersistentState{
+					CurrentTerm: 3,
+					Log: []LogEntry{
+						{Term: 3, Index: 1},
+						{Term: 3, Index: 2, Command: []byte("set x=1")},
+					},
+				}
+
+				n := &Node{
+					cfg: Config{
+						ID:                 "node-a",
+						ElectionTimeoutMin: time.Hour,
+						ElectionTimeoutMax: time.Hour,
+					},
+					role:       Leader,
+					persistent: persistent,
+					leaderState: &LeaderState{
+						NextIndex:  map[PeerID]uint64{},
+						MatchIndex: map[PeerID]uint64{},
+					},
+					storage: &memoryStorage{state: persistent},
+					pendingClientRequests: map[uint64]chan clientRequestResult{
+						2: clientReply,
+					},
+					requestVoteCh:   make(chan requestVoteCall),
+					appendEntriesCh: make(chan appendEntriesCall),
+				}
+
+				runDone := make(chan error, 1)
+				go func() {
+					runDone <- n.Run(ctx)
+				}()
+
+				accepted, err := tt.request(ctx, n)
+				if err != nil {
+					t.Fatalf("higher-term request: %v", err)
+				}
+				if accepted {
+					t.Fatal("request unexpectedly accepted")
+				}
+
+				select {
+				case result := <-clientReply:
+					if result.success {
+						t.Fatal("pending client succeeded after leadership loss")
+					}
+					if result.err != nil {
+						t.Fatalf("unexpected client error: %v", result.err)
+					}
+				default:
+					t.Fatal("Run did not resolve pending client")
+				}
+
+				n.mu.Lock()
+				remaining := len(n.pendingClientRequests)
+				n.mu.Unlock()
+
+				if remaining != 0 {
+					t.Errorf("pending requests: got %d, want 0", remaining)
+				}
+
+				cancel()
+				if err := <-runDone; err != context.Canceled {
+					t.Fatalf("Run returned %v, want context.Canceled", err)
+				}
+			})
+		})
+	}
+}
+
+func TestRunFailsDetachedClientsBeforeReturningStorageError(t *testing.T) {
+	tests := []struct {
+		name    string
+		request func(context.Context, *Node) error
+	}{
+		{
+			name: "persist granted vote",
+			request: func(ctx context.Context, n *Node) error {
+				_, err := n.submitRequestVote(ctx, RequestVoteArgs{
+					Term:         4,
+					CandidateID:  "node-b",
+					LastLogIndex: 2,
+					LastLogTerm:  3,
+				})
+				return err
+			},
+		},
+		{
+			name: "persist incoming entries",
+			request: func(ctx context.Context, n *Node) error {
+				_, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+					Term:         4,
+					LeaderID:     "node-b",
+					PrevLogIndex: 2,
+					PrevLogTerm:  3,
+					Entries: []LogEntry{
+						{Term: 4, Index: 3, Command: []byte("set y=2")},
+					},
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				saveErr := errors.New("second save failed")
+				clientReply := make(chan clientRequestResult, 1)
+
+				persistent := PersistentState{
+					CurrentTerm: 3,
+					VotedFor:    "node-a",
+					Log: []LogEntry{
+						{Term: 3, Index: 1},
+						{Term: 3, Index: 2, Command: []byte("set x=1")},
+					},
+				}
+
+				storage := &failSecondSaveStorage{
+					state: persistent,
+					err:   saveErr,
+				}
+
+				n := &Node{
+					cfg: Config{
+						ID:                 "node-a",
+						ElectionTimeoutMin: time.Hour,
+						ElectionTimeoutMax: time.Hour,
+					},
+					role:       Leader,
+					persistent: persistent,
+					leaderState: &LeaderState{
+						NextIndex:  map[PeerID]uint64{},
+						MatchIndex: map[PeerID]uint64{},
+					},
+					storage: storage,
+					pendingClientRequests: map[uint64]chan clientRequestResult{
+						2: clientReply,
+					},
+					requestVoteCh:   make(chan requestVoteCall),
+					appendEntriesCh: make(chan appendEntriesCall),
+				}
+
+				runDone := make(chan error, 1)
+				go func() {
+					runDone <- n.Run(ctx)
+				}()
+
+				if err := tt.request(ctx, n); !errors.Is(err, saveErr) {
+					t.Fatalf("request error: got %v, want %v", err, saveErr)
+				}
+
+				if err := <-runDone; !errors.Is(err, saveErr) {
+					t.Fatalf("Run error: got %v, want %v", err, saveErr)
+				}
+
+				// Run has exited: all its state changes are now observable.
+				if storage.saves != 2 {
+					t.Fatalf("save attempts: got %d, want 2", storage.saves)
+				}
+
+				if n.role != Follower || n.persistent.CurrentTerm != 4 {
+					t.Fatalf(
+						"stepdown not published: role=%v term=%d",
+						n.role,
+						n.persistent.CurrentTerm,
+					)
+				}
+
+				if len(n.pendingClientRequests) != 0 {
+					t.Fatal("pending clients remained attached after stepdown")
+				}
+
+				select {
+				case result := <-clientReply:
+					if result.success {
+						t.Fatal("pending client succeeded after leadership loss")
+					}
+				default:
+					t.Fatal("detached client was lost on storage error")
+				}
+			})
+		})
+	}
 }

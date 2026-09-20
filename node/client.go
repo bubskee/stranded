@@ -102,3 +102,23 @@ func (n *Node) completeAppliedClientRequests() {
 		}
 	}
 }
+
+// Caller must hold n.mu.
+func (n *Node) takePendingClientRequestsLocked() []chan clientRequestResult {
+	var replies []chan clientRequestResult
+
+	for index, reply := range n.pendingClientRequests {
+		replies = append(replies, reply)
+		delete(n.pendingClientRequests, index)
+	}
+
+	return replies
+}
+
+func failClientRequests(replies []chan clientRequestResult) {
+	for _, reply := range replies {
+		reply <- clientRequestResult{
+			success: false,
+		}
+	}
+}

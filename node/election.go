@@ -23,6 +23,16 @@ type voteReplyEvent struct {
 	reply        RequestVoteReply
 }
 
+type voteReplyResult struct {
+	becameLeader  bool
+	failedClients []chan clientRequestResult
+}
+
+type requestVoteProcessResult struct {
+	reply         RequestVoteReply
+	failedClients []chan clientRequestResult
+}
+
 func (n *Node) startElection() (election, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -106,36 +116,46 @@ func (n *Node) handleVoteReply(
 	peer PeerID,
 	electionTerm uint64,
 	reply *RequestVoteReply,
-) (bool, error) {
+) (voteReplyResult, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if reply.Term > n.persistent.CurrentTerm {
-		return false, n.becomeFollowerLocked(reply.Term)
+		pending, err := n.becomeFollowerLocked(reply.Term)
+		if err != nil {
+			return voteReplyResult{}, err
+		}
+
+		return voteReplyResult{
+			failedClients: pending,
+		}, nil
 	}
 
 	if n.role != Candidate || n.persistent.CurrentTerm != electionTerm {
-		return false, nil
+		return voteReplyResult{}, nil
 	}
 
 	if reply.Term < electionTerm {
-		return false, nil
+		return voteReplyResult{}, nil
 	}
 
 	if _, seen := n.candidateState.Votes[peer]; seen {
-		return false, nil
+		return voteReplyResult{}, nil
 	}
 
 	n.candidateState.Votes[peer] = reply.VoteGranted
 
 	if n.hasElectionQuorumLocked() {
 		if err := n.becomeLeaderLocked(); err != nil {
-			return false, err
+			return voteReplyResult{}, err
 		}
-		return true, nil
+
+		return voteReplyResult{
+			becameLeader: true,
+		}, nil
 	}
 
-	return false, nil
+	return voteReplyResult{}, nil
 }
 
 func (n *Node) hasElectionQuorumLocked() bool {
@@ -188,13 +208,20 @@ func (n *Node) becomeLeaderLocked() error {
 	return nil
 }
 
-func (n *Node) becomeFollowerLocked(term uint64) error {
+func (n *Node) becomeFollowerLocked(
+	term uint64,
+) ([]chan clientRequestResult, error) {
 	next := n.persistent
 	next.CurrentTerm = term
 	next.VotedFor = ""
 
 	if err := n.storage.Save(next); err != nil {
-		return err
+		return nil, err
+	}
+
+	var pending []chan clientRequestResult
+	if n.role == Leader {
+		pending = n.takePendingClientRequestsLocked()
 	}
 
 	n.persistent = next
@@ -202,7 +229,7 @@ func (n *Node) becomeFollowerLocked(term uint64) error {
 	n.candidateState = nil
 	n.leaderState = nil
 
-	return nil
+	return pending, nil
 }
 
 func (n *Node) submitRequestVote(
@@ -232,33 +259,37 @@ func (n *Node) submitRequestVote(
 
 func (n *Node) processRequestVote(
 	args RequestVoteArgs,
-) (RequestVoteReply, error) {
+) (requestVoteProcessResult, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	reply := RequestVoteReply{
-		Term: n.persistent.CurrentTerm,
+	result := requestVoteProcessResult{
+		reply: RequestVoteReply{
+			Term: n.persistent.CurrentTerm,
+		},
 	}
 
 	if args.Term < n.persistent.CurrentTerm {
-		return reply, nil
+		return result, nil
 	}
 
 	if args.Term > n.persistent.CurrentTerm {
-		if err := n.becomeFollowerLocked(args.Term); err != nil {
-			return RequestVoteReply{}, err
+		pending, err := n.becomeFollowerLocked(args.Term)
+		if err != nil {
+			return result, err
 		}
 
-		reply.Term = n.persistent.CurrentTerm
+		result.failedClients = pending
+		result.reply.Term = n.persistent.CurrentTerm
 	}
 
 	if n.persistent.VotedFor != "" &&
 		n.persistent.VotedFor != args.CandidateID {
-		return reply, nil
+		return result, nil
 	}
 
 	if !n.candidateLogUpToDateLocked(args) {
-		return reply, nil
+		return result, nil
 	}
 
 	if n.persistent.VotedFor == "" {
@@ -266,17 +297,14 @@ func (n *Node) processRequestVote(
 		next.VotedFor = args.CandidateID
 
 		if err := n.storage.Save(next); err != nil {
-			return RequestVoteReply{}, err
+			return result, err
 		}
 
 		n.persistent = next
 	}
 
-	reply.Term = n.persistent.CurrentTerm
-	reply.VoteGranted = true
-
-	// More RequestVote semantics next.
-	return reply, nil
+	result.reply.VoteGranted = true
+	return result, nil
 }
 
 func (n *Node) candidateLogUpToDateLocked(args RequestVoteArgs) bool {

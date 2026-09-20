@@ -93,7 +93,6 @@ func (n *Node) Run(ctx context.Context) error {
 				if err := n.applyCommitted(ctx); err != nil {
 					return err
 				}
-
 				n.completeAppliedClientRequests()
 			}
 
@@ -102,7 +101,7 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 		case event := <-voteReplies:
-			becameLeader, err := n.handleVoteReply(
+			result, err := n.handleVoteReply(
 				event.peer,
 				event.electionTerm,
 				&event.reply,
@@ -111,18 +110,22 @@ func (n *Node) Run(ctx context.Context) error {
 				return err
 			}
 
-			if becameLeader {
+			failClientRequests(result.failedClients)
+
+			if result.becameLeader {
 				n.sendAppendEntriesToAll(ctx, appendReplies)
 			}
 
+		// appendReplies case
 		case event := <-appendReplies:
-			retry, commitAdvanced, err :=
-				n.handleAppendEntriesReply(event)
+			result, err := n.handleAppendEntriesReply(event)
 			if err != nil {
 				return err
 			}
 
-			if commitAdvanced {
+			failClientRequests(result.failedClients)
+
+			if result.commitAdvanced {
 				if err := n.applyCommitted(ctx); err != nil {
 					return err
 				}
@@ -130,24 +133,22 @@ func (n *Node) Run(ctx context.Context) error {
 				n.completeAppliedClientRequests()
 			}
 
-			if retry {
-				n.sendAppendEntries(
-					ctx,
-					event.peer,
-					appendReplies,
-				)
+			if result.retry {
+				n.sendAppendEntries(ctx, event.peer, appendReplies)
 			}
 
 		// RequestVote case
 		case call := <-n.requestVoteCh:
-			reply, err := n.processRequestVote(call.args)
+			result, err := n.processRequestVote(call.args)
 
-			if err == nil && reply.VoteGranted {
+			failClientRequests(result.failedClients)
+
+			if err == nil && result.reply.VoteGranted {
 				n.resetElectionTimer()
 			}
 
 			call.reply <- requestVoteResult{
-				reply: reply,
+				reply: result.reply,
 				err:   err,
 			}
 
@@ -157,18 +158,20 @@ func (n *Node) Run(ctx context.Context) error {
 
 		// AppendEntries case
 		case call := <-n.appendEntriesCh:
-			reply, err := n.processAppendEntries(call.args)
+			result, err := n.processAppendEntries(call.args)
 
-			if err == nil && call.args.Term >= reply.Term {
+			failClientRequests(result.failedClients)
+
+			if err == nil && call.args.Term >= result.reply.Term {
 				n.resetElectionTimer()
 			}
 
-			if err == nil && reply.Success {
+			if err == nil && result.reply.Success {
 				err = n.applyCommitted(ctx)
 			}
 
 			call.reply <- appendEntriesResult{
-				reply: reply,
+				reply: result.reply,
 				err:   err,
 			}
 

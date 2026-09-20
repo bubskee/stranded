@@ -462,8 +462,22 @@ func TestNewInitializesAppendEntriesChannel(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if n.requestVoteCh == nil {
+	if n.appendEntriesCh == nil {
 		t.Fatal("appendEntriesCh is nil")
+	}
+}
+
+func TestNewInitializesApplyChannel(t *testing.T) {
+	n, err := New(Config{
+		ID:      "node-a",
+		DataDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if n.applyCh == nil {
+		t.Fatal("applyCh is nil")
 	}
 }
 

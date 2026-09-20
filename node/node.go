@@ -46,6 +46,7 @@ func New(cfg Config) (*Node, error) {
 		role:            Follower,
 		persistent:      persistent,
 		storage:         storage,
+		applyCh:         make(chan LogEntry),
 		requestVoteCh:   make(chan requestVoteCall),
 		appendEntriesCh: make(chan appendEntriesCall),
 	}, nil
@@ -85,6 +86,10 @@ func (n *Node) Run(ctx context.Context) error {
 
 			if err == nil && call.args.Term >= reply.Term {
 				n.resetElectionTimer()
+			}
+
+			if err == nil && reply.Success {
+				err = n.applyCommitted(ctx)
 			}
 
 			call.reply <- appendEntriesResult{

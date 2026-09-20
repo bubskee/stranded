@@ -53,3 +53,17 @@ challenges, design considerations
   tick model is attractive because it turns time into another deterministic
   state-machine input, but first establishing `Run` as the serialization point;
   revisit logical ticks once RPCs and vote replies flow through that path.
+
+### Apply-path prior art
+
+State-machine application should remain outside the core Raft state transition and outside `n.mu`.
+
+etcd/raft exposes committed entries to the embedding application through its Ready/Advance boundary; its asynchronous mode makes log persistence and state-machine application separate local execution paths. HashiCorp Raft similarly feeds committed logs to a dedicated `runFSM` path so application work does not block internal Raft processing. CockroachDB follows the same broad separation when integrating etcd/raft.
+
+For `stranded`, follow the HashiCorp-style boundary at the smallest useful scale:
+
+* `processAppendEntries` owns replication and commitment only.
+* After `processAppendEntries` returns and releases `n.mu`, `Run` hands entries in `(LastApplied, CommitIndex]` to `applyCh` in log-index order.
+* `LastApplied` advances only after successful application handoff, never merely when `CommitIndex` advances.
+* For now, application handoff may synchronously backpressure `Run`. Do not introduce a larger Ready/Advance or dedicated-applier abstraction until tests demonstrate that this matters for liveness or ordering.
+* If that pressure appears, the natural next step is a dedicated ordered applier/ack path rather than allowing state-machine work to run under the Raft mutex.

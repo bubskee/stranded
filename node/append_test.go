@@ -714,7 +714,9 @@ func TestRunAdvancesCommitIndexFromLeaderCommit(t *testing.T) {
 			},
 			volatile: VolatileState{
 				CommitIndex: 1,
+				LastApplied: 1,
 			},
+			applyCh:         make(chan LogEntry, 1),
 			storage:         &memoryStorage{},
 			appendEntriesCh: make(chan appendEntriesCall),
 		}
@@ -744,6 +746,210 @@ func TestRunAdvancesCommitIndexFromLeaderCommit(t *testing.T) {
 
 		if commitIndex != 2 {
 			t.Errorf("commit index: got %d, want 2", commitIndex)
+		}
+	})
+}
+
+func TestRunCapsCommitIndexAtLastLogIndex(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		log := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 2, Index: 2},
+			{Term: 3, Index: 3},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log:         log,
+			},
+			volatile: VolatileState{
+				CommitIndex: 1,
+				LastApplied: 1,
+			},
+			applyCh:         make(chan LogEntry, 2),
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 3,
+			PrevLogTerm:  3,
+			LeaderCommit: 99,
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if !reply.Success {
+			t.Fatal("AppendEntries was rejected")
+		}
+
+		n.mu.Lock()
+		commitIndex := n.volatile.CommitIndex
+		n.mu.Unlock()
+
+		if commitIndex != 3 {
+			t.Errorf("commit index: got %d, want 3", commitIndex)
+		}
+	})
+}
+
+func TestRunDoesNotDecreaseCommitIndex(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		log := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 2, Index: 2},
+			{Term: 3, Index: 3},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log:         log,
+			},
+			volatile: VolatileState{
+				CommitIndex: 3,
+				LastApplied: 3,
+			},
+			storage:         &memoryStorage{},
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		_, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 3,
+			PrevLogTerm:  3,
+			LeaderCommit: 1,
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		n.mu.Lock()
+		commitIndex := n.volatile.CommitIndex
+		n.mu.Unlock()
+
+		if commitIndex != 3 {
+			t.Errorf("commit index decreased: got %d, want 3", commitIndex)
+		}
+	})
+}
+
+func TestRunAppliesNewlyCommittedEntry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		entry1 := LogEntry{
+			Term:    1,
+			Index:   1,
+			Command: []byte("one"),
+		}
+		entry2 := LogEntry{
+			Term:    2,
+			Index:   2,
+			Command: []byte("two"),
+		}
+		entry3 := LogEntry{
+			Term:    3,
+			Index:   3,
+			Command: []byte("three"),
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				ElectionTimeoutMin: time.Second,
+				ElectionTimeoutMax: time.Second,
+			},
+			role: Follower,
+			persistent: PersistentState{
+				CurrentTerm: 3,
+				Log: []LogEntry{
+					entry1,
+					entry2,
+					entry3,
+				},
+			},
+			volatile: VolatileState{
+				CommitIndex: 1,
+				LastApplied: 1,
+			},
+			storage:         &memoryStorage{},
+			applyCh:         make(chan LogEntry, 1),
+			appendEntriesCh: make(chan appendEntriesCall),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		reply, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
+			Term:         3,
+			LeaderID:     "node-b",
+			PrevLogIndex: 3,
+			PrevLogTerm:  3,
+			LeaderCommit: 2,
+		})
+		if err != nil {
+			t.Fatalf("submit AppendEntries: %v", err)
+		}
+
+		if !reply.Success {
+			t.Fatal("AppendEntries was rejected")
+		}
+
+		select {
+		case got := <-n.applyCh:
+			if !reflect.DeepEqual(got, entry2) {
+				t.Errorf("applied entry: got %+v, want %+v", got, entry2)
+			}
+
+		default:
+			t.Fatal("newly committed entry was not applied")
+		}
+
+		n.mu.Lock()
+		commitIndex := n.volatile.CommitIndex
+		lastApplied := n.volatile.LastApplied
+		n.mu.Unlock()
+
+		if commitIndex != 2 {
+			t.Errorf("commit index: got %d, want 2", commitIndex)
+		}
+
+		if lastApplied != 2 {
+			t.Errorf("last applied: got %d, want 2", lastApplied)
 		}
 	})
 }

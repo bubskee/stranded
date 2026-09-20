@@ -71,3 +71,9 @@ For `stranded`, follow the HashiCorp-style boundary at the smallest useful scale
 ### Leader transition / outbound work: 
 
 Follow the etcd/HashiCorp separation rather than their full machinery. Consensus transitions, including processing vote replies and becoming leader, should be serialized through Run. Becoming leader initializes leader replication state but performs no network I/O while holding Raft state. After the transition, Run schedules outbound AppendEntries work. Start with the paper’s initial empty heartbeat; when general leader-side log replication exists, add the current-term no-op entry used by mature implementations to establish commitment in the new term.
+
+## day 5
+
+Final stretch for RAFT MVP.
+
+Today's goal: v0 core complete: a 3-node cluster can elect a leader, accept a client command, durably replicate and commit it to a majority, apply it in order, survive leader loss, elect a replacement, and continue.

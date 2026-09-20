@@ -22,7 +22,8 @@ type Node struct {
 	storage   Storage
 	transport Transport
 
-	electionTimer *time.Timer
+	electionTimer         *time.Timer
+	pendingClientRequests map[uint64]chan clientRequestResult
 
 	applyCh         chan LogEntry
 	requestVoteCh   chan requestVoteCall
@@ -77,9 +78,27 @@ func (n *Node) Run(ctx context.Context) error {
 				continue
 			}
 
-			// Leader handling comes in the next red.
-			call.reply <- clientRequestResult{
-				success: false,
+			commitAdvanced, err := n.appendClientCommand(
+				call.command,
+				call.reply,
+			)
+			if err != nil {
+				call.reply <- clientRequestResult{
+					err: err,
+				}
+				return err
+			}
+
+			if commitAdvanced {
+				if err := n.applyCommitted(ctx); err != nil {
+					return err
+				}
+
+				n.completeAppliedClientRequests()
+			}
+
+			for peer := range n.cfg.Peers {
+				n.sendAppendEntries(ctx, peer, appendReplies)
 			}
 
 		case event := <-voteReplies:
@@ -93,11 +112,12 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 			if becameLeader {
-				n.sendInitialHeartbeats(ctx, appendReplies)
+				n.sendAppendEntriesToAll(ctx, appendReplies)
 			}
 
 		case event := <-appendReplies:
-			retry, commitAdvanced, err := n.handleAppendEntriesReply(event)
+			retry, commitAdvanced, err :=
+				n.handleAppendEntriesReply(event)
 			if err != nil {
 				return err
 			}
@@ -106,10 +126,16 @@ func (n *Node) Run(ctx context.Context) error {
 				if err := n.applyCommitted(ctx); err != nil {
 					return err
 				}
+
+				n.completeAppliedClientRequests()
 			}
 
 			if retry {
-				n.sendAppendEntries(ctx, event.peer, appendReplies)
+				n.sendAppendEntries(
+					ctx,
+					event.peer,
+					appendReplies,
+				)
 			}
 
 		// RequestVote case

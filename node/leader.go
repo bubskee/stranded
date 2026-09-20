@@ -10,7 +10,7 @@ type appendReplyEvent struct {
 	reply      AppendEntriesReply
 }
 
-func (n *Node) sendInitialHeartbeats(
+func (n *Node) sendAppendEntriesToAll(
 	ctx context.Context,
 	replies chan<- appendReplyEvent,
 ) {

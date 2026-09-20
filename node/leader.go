@@ -105,47 +105,46 @@ func (n *Node) callAppendEntries(
 
 func (n *Node) handleAppendEntriesReply(
 	event appendReplyEvent,
-) (bool, error) {
+) (retry bool, commitAdvanced bool, err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if event.reply.Term > n.persistent.CurrentTerm {
-		return false, n.becomeFollowerLocked(event.reply.Term)
+		return false, false, n.becomeFollowerLocked(event.reply.Term)
 	}
 
 	if n.role != Leader ||
 		event.sentTerm != n.persistent.CurrentTerm ||
 		event.reply.Term < n.persistent.CurrentTerm {
-		return false, nil
+		return false, false, nil
 	}
 
 	if !event.reply.Success {
 		currentNext := n.leaderState.NextIndex[event.peer]
 
-		// Ignore a rejection from an obsolete RPC.
 		if event.nextIndex != currentNext {
-			return false, nil
+			return false, false, nil
 		}
 
 		if currentNext <= 1 {
-			return false, nil
+			return false, false, nil
 		}
 
 		n.leaderState.NextIndex[event.peer] = currentNext - 1
-		return true, nil
+		return true, false, nil
 	}
 
 	if event.matchIndex > n.leaderState.MatchIndex[event.peer] {
 		n.leaderState.MatchIndex[event.peer] = event.matchIndex
 		n.leaderState.NextIndex[event.peer] = event.matchIndex + 1
 
-		n.advanceLeaderCommitLocked()
+		commitAdvanced = n.advanceLeaderCommitLocked()
 	}
 
-	return false, nil
+	return false, commitAdvanced, nil
 }
 
-func (n *Node) advanceLeaderCommitLocked() {
+func (n *Node) advanceLeaderCommitLocked() bool {
 	current := n.volatile.CommitIndex
 	currentTerm := n.persistent.CurrentTerm
 
@@ -159,13 +158,11 @@ func (n *Node) advanceLeaderCommitLocked() {
 			continue
 		}
 
-		// Raft §5.4.2: only directly advance commitIndex using
-		// replica counts for entries from the leader's current term.
 		if entry.Term != currentTerm {
 			continue
 		}
 
-		replicated := 1 // the leader itself
+		replicated := 1 // leader itself
 
 		for peer := range n.cfg.Peers {
 			if n.leaderState.MatchIndex[peer] >= entry.Index {
@@ -179,4 +176,5 @@ func (n *Node) advanceLeaderCommitLocked() {
 	}
 
 	n.volatile.CommitIndex = next
+	return next > current
 }

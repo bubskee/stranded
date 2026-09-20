@@ -188,7 +188,7 @@ func TestSuccessfulAppendEntriesReplyDoesNotRegressFollowerProgress(t *testing.T
 	}
 
 	// A newer RPC proves replication through index 5.
-	_, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		matchIndex: 5,
@@ -202,7 +202,7 @@ func TestSuccessfulAppendEntriesReplyDoesNotRegressFollowerProgress(t *testing.T
 	}
 
 	// Then an older in-flight RPC arrives late and only proves index 3.
-	_, err = n.handleAppendEntriesReply(appendReplyEvent{
+	_, _, err = n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		matchIndex: 3,
@@ -246,7 +246,7 @@ func TestStaleTermAppendEntriesReplyDoesNotMutateFollowerProgress(t *testing.T) 
 		storage: &memoryStorage{},
 	}
 
-	_, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		matchIndex: 9,
@@ -428,7 +428,7 @@ func TestStaleAppendEntriesRejectionDoesNotRegressFollowerProgress(t *testing.T)
 	// This rejection belongs to an older RPC that was sent when
 	// node-b's NextIndex was still 3. Since then, newer replication
 	// has advanced it to 6.
-	retry, err := n.handleAppendEntriesReply(appendReplyEvent{
+	retry, _, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:      "node-b",
 		sentTerm:  3,
 		nextIndex: 3,
@@ -492,7 +492,7 @@ func TestSuccessfulAppendEntriesReplyAdvancesLeaderCommitIndex(t *testing.T) {
 		storage: &memoryStorage{},
 	}
 
-	_, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		nextIndex:  1,
@@ -549,7 +549,7 @@ func TestLeaderDoesNotCommitOldTermEntryFromReplicaCountAlone(t *testing.T) {
 		storage: &memoryStorage{},
 	}
 
-	_, err := n.handleAppendEntriesReply(appendReplyEvent{
+	_, _, err := n.handleAppendEntriesReply(appendReplyEvent{
 		peer:       "node-b",
 		sentTerm:   3,
 		nextIndex:  1,
@@ -797,6 +797,61 @@ func TestLeaderNoOpPersistenceFailurePreventsBecomingLeader(t *testing.T) {
 				"no-op persisted despite failed save: got %+v",
 				persisted.Log,
 			)
+		}
+	})
+}
+
+func TestLeaderAppliesEntryAfterQuorumCommit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			transport: successfulAppendReplyTransport{},
+			storage:   &memoryStorage{},
+			applyCh:   make(chan LogEntry, 1),
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		commitIndex := n.volatile.CommitIndex
+		lastApplied := n.volatile.LastApplied
+		n.mu.Unlock()
+
+		if commitIndex != 1 {
+			t.Fatalf("commit index: got %d, want 1", commitIndex)
+		}
+
+		select {
+		case got := <-n.applyCh:
+			want := LogEntry{
+				Term:  1,
+				Index: 1,
+			}
+
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("applied entry: got %+v, want %+v", got, want)
+			}
+		default:
+			t.Fatal("newly committed leader entry was not applied")
+		}
+
+		if lastApplied != 1 {
+			t.Errorf("last applied: got %d, want 1", lastApplied)
 		}
 	})
 }

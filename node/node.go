@@ -78,9 +78,15 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 		case event := <-appendReplies:
-			retry, err := n.handleAppendEntriesReply(event)
+			retry, commitAdvanced, err := n.handleAppendEntriesReply(event)
 			if err != nil {
 				return err
+			}
+
+			if commitAdvanced {
+				if err := n.applyCommitted(ctx); err != nil {
+					return err
+				}
 			}
 
 			if retry {

@@ -93,3 +93,33 @@ do not remove synchronous application backpressure.
 First invariant: an idle leader sends periodic AppendEntries and remains leader
 past an election timeout. Explicit ticks will also support the later deterministic
 multi-node failure harness.
+
+### v0 core — COMPLETE
+
+The day-5 goal is met: a three-node cluster elects a leader, accepts client
+commands, persists and replicates them to a majority, applies committed entries
+in order, survives leader loss, elects a replacement, and continues.
+
+Integration coverage now includes:
+
+- Reliable replication and ordered application across three nodes.
+- Continued writes after leader loss.
+- No client success, commitment, or application without quorum.
+- Partition healing: the former leader steps down, fails its pending client,
+  and replaces its uncommitted suffix without applying the abandoned command.
+- File-backed restart through New: persisted term, vote, and log are restored;
+  the restarted node catches up and replays committed history to a fresh
+  application.
+
+Validation passed:
+
+- `go test ./...`
+- `go test -race ./node -run '^TestCluster'`
+
+Scope: consensus-core integration with controlled logical ticks, in-memory RPC
+routing, and file-backed storage. Client success means application-channel
+handoff. Restart coverage uses orderly node shutdown and reconstruction, not
+power-loss fault injection; replay assumes a fresh application.
+
+CLI/process wiring, production hardening, and exactly-once external effects
+remain outside this milestone. Today's planned v0 work is complete.

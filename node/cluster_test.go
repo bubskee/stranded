@@ -20,11 +20,17 @@ type clusterTransport struct {
 
 var errClusterPartition = errors.New("cluster link partitioned")
 
-func (tr *clusterTransport) partitioned(from, to PeerID) bool {
+func (tr *clusterTransport) destination(
+	from, to PeerID,
+) (*Node, context.Context, error) {
 	tr.mu.RLock()
 	defer tr.mu.RUnlock()
 
-	return tr.isolated[from] || tr.isolated[to]
+	if tr.isolated[from] || tr.isolated[to] {
+		return nil, nil, errClusterPartition
+	}
+
+	return tr.nodes[to], tr.contexts[to], nil
 }
 
 func (tr *clusterTransport) RequestVote(
@@ -32,14 +38,15 @@ func (tr *clusterTransport) RequestVote(
 	peer PeerID,
 	args *RequestVoteArgs,
 ) (*RequestVoteReply, error) {
-	if tr.partitioned(args.CandidateID, peer) {
-		return nil, errClusterPartition
+	n, peerCtx, err := tr.destination(args.CandidateID, peer)
+	if err != nil {
+		return nil, err
 	}
 
-	callCtx, cancel := tr.callContext(ctx, peer)
+	callCtx, cancel := tr.callContext(ctx, peerCtx)
 	defer cancel()
 
-	reply, err := tr.nodes[peer].submitRequestVote(callCtx, *args)
+	reply, err := n.submitRequestVote(callCtx, *args)
 	return &reply, err
 }
 
@@ -48,27 +55,25 @@ func (tr *clusterTransport) AppendEntries(
 	peer PeerID,
 	args *AppendEntriesArgs,
 ) (*AppendEntriesReply, error) {
-	if tr.partitioned(args.LeaderID, peer) {
-		return nil, errClusterPartition
+	n, peerCtx, err := tr.destination(args.LeaderID, peer)
+	if err != nil {
+		return nil, err
 	}
 
-	callCtx, cancel := tr.callContext(ctx, peer)
+	callCtx, cancel := tr.callContext(ctx, peerCtx)
 	defer cancel()
 
-	reply, err := tr.nodes[peer].submitAppendEntries(callCtx, *args)
+	reply, err := n.submitAppendEntries(callCtx, *args)
 	return &reply, err
 }
 
 func (tr *clusterTransport) callContext(
 	ctx context.Context,
-	peer PeerID,
+	peerCtx context.Context,
 ) (context.Context, context.CancelFunc) {
 	callCtx, cancel := context.WithCancel(ctx)
-	peerCtx := tr.contexts[peer]
 
 	stop := context.AfterFunc(peerCtx, cancel)
-
-	// An already-stopped destination should fail immediately.
 	if peerCtx.Err() != nil {
 		cancel()
 	}
@@ -92,7 +97,8 @@ type testCluster struct {
 }
 
 // Call inside synctest.Test.
-func newTestCluster(ids ...PeerID) *testCluster {
+func newTestCluster(t *testing.T, ids ...PeerID) *testCluster {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &testCluster{
@@ -121,23 +127,23 @@ func newTestCluster(ids ...PeerID) *testCluster {
 			}
 		}
 
-		c.nodes[id] = &Node{
-			cfg: Config{
-				ID:                 id,
-				Peers:              peers,
-				TickInterval:       10 * time.Millisecond,
-				ElectionTimeoutMin: 100 * time.Millisecond,
-				ElectionTimeoutMax: 100 * time.Millisecond,
-				HeartbeatInterval:  20 * time.Millisecond,
-			},
-			role:            Follower,
-			storage:         &memoryStorage{},
-			transport:       transport,
-			applyCh:         make(chan LogEntry, 16),
-			requestVoteCh:   make(chan requestVoteCall),
-			appendEntriesCh: make(chan appendEntriesCall),
-			clientRequestCh: make(chan clientRequestCall),
+		n, err := New(Config{
+			ID:                 id,
+			Peers:              peers,
+			DataDir:            t.TempDir(),
+			TickInterval:       10 * time.Millisecond,
+			ElectionTimeoutMin: 100 * time.Millisecond,
+			ElectionTimeoutMax: 100 * time.Millisecond,
+			HeartbeatInterval:  20 * time.Millisecond,
+		})
+		if err != nil {
+			c.cancel()
+			t.Fatalf("create %s: %v", id, err)
 		}
+
+		n.transport = transport
+		n.applyCh = make(chan LogEntry, 16)
+		c.nodes[id] = n
 		c.ticks[id] = make(chan time.Time)
 		c.done[id] = make(chan error, 1)
 
@@ -147,8 +153,13 @@ func newTestCluster(ids ...PeerID) *testCluster {
 	}
 
 	for _, id := range ids {
+		n := c.nodes[id]
+		ctx := c.nodeContexts[id]
+		ticks := c.ticks[id]
+		done := c.done[id]
+
 		go func() {
-			c.done[id] <- c.nodes[id].run(c.nodeContexts[id], c.ticks[id])
+			done <- n.run(ctx, ticks)
 		}()
 	}
 
@@ -218,11 +229,51 @@ func (c *testCluster) heal(id PeerID) {
 	c.transport.mu.Unlock()
 }
 
+func (c *testCluster) restartNode(t *testing.T, id PeerID) {
+	t.Helper()
+
+	if _, running := c.done[id]; running {
+		t.Fatalf("%s must be stopped before restart", id)
+	}
+
+	synctest.Wait()
+
+	old := c.nodes[id]
+
+	// New reopens the same data directory and loads persistent state.
+	n, err := New(old.cfg)
+	if err != nil {
+		t.Fatalf("restart %s: %v", id, err)
+	}
+
+	n.transport = c.transport
+	n.applyCh = make(chan LogEntry, 16)
+
+	ctx, cancel := context.WithCancel(c.ctx)
+	ticks := make(chan time.Time)
+	done := make(chan error, 1)
+
+	c.transport.mu.Lock()
+	c.nodes[id] = n
+	c.nodeContexts[id] = ctx
+	c.transport.mu.Unlock()
+
+	c.nodeCancels[id] = cancel
+	c.ticks[id] = ticks
+	c.done[id] = done
+
+	go func() {
+		done <- n.run(ctx, ticks)
+	}()
+
+	synctest.Wait()
+}
+
 // SCENARIOS
 
 func TestClusterReplicatesAndAppliesClientCommand(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newTestCluster("node-a", "node-b", "node-c")
+		c := newTestCluster(t, "node-a", "node-b", "node-c")
 		defer c.stop(t)
 
 		// Only A reaches its election deadline.
@@ -325,7 +376,7 @@ func TestClusterReplicatesAndAppliesClientCommand(t *testing.T) {
 
 func TestClusterContinuesAfterLeaderStops(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newTestCluster("node-a", "node-b", "node-c")
+		c := newTestCluster(t, "node-a", "node-b", "node-c")
 		defer c.stop(t)
 
 		submit := func(id PeerID, command string) {
@@ -459,7 +510,7 @@ func TestClusterContinuesAfterLeaderStops(t *testing.T) {
 
 func TestClusterWithoutQuorumDoesNotCommitClientCommand(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newTestCluster("node-a", "node-b", "node-c")
+		c := newTestCluster(t, "node-a", "node-b", "node-c")
 		defer c.stop(t)
 
 		c.advance(t, "node-a", 10)
@@ -565,7 +616,7 @@ func TestClusterWithoutQuorumDoesNotCommitClientCommand(t *testing.T) {
 
 func TestClusterHealsPartitionAndReplacesUncommittedSuffix(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newTestCluster("node-a", "node-b", "node-c")
+		c := newTestCluster(t, "node-a", "node-b", "node-c")
 		defer c.stop(t)
 
 		startClient := func(id PeerID, command string) <-chan clientRequestResult {
@@ -725,6 +776,195 @@ func TestClusterHealsPartitionAndReplacesUncommittedSuffix(t *testing.T) {
 			case extra := <-n.applyCh:
 				t.Fatalf("%s applied unexpected extra entry: %+v", id, extra)
 			default:
+			}
+		}
+	})
+}
+
+func TestClusterRestartedLeaderLoadsStateAndCatchesUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCluster(t, "node-a", "node-b", "node-c")
+		defer c.stop(t)
+
+		submit := func(id PeerID, command string) {
+			t.Helper()
+
+			clientDone := make(chan clientRequestResult, 1)
+			go func() {
+				result, err := c.nodes[id].submitClientRequest(
+					c.ctx,
+					[]byte(command),
+				)
+				result.err = err
+				clientDone <- result
+			}()
+
+			synctest.Wait()
+
+			select {
+			case result := <-clientDone:
+				if result.err != nil || !result.success {
+					t.Fatalf("%s client request failed: %+v", id, result)
+				}
+			default:
+				t.Fatalf("%s client request did not complete", id)
+			}
+		}
+
+		// A leads term 1 and commits the first command.
+		c.advance(t, "node-a", 10)
+		submit("node-a", "set x=1")
+		c.advance(t, "node-a", 2)
+
+		for _, id := range []PeerID{"node-b", "node-c"} {
+			n := c.nodes[id]
+			n.mu.Lock()
+			commitIndex := n.volatile.CommitIndex
+			n.mu.Unlock()
+
+			if commitIndex != 2 {
+				t.Fatalf(
+					"%s before leader loss: commit=%d, want 2",
+					id, commitIndex,
+				)
+			}
+		}
+
+		c.stopNode(t, "node-a")
+
+		// B and C elect a replacement while A remains stopped.
+		c.advance(t, "node-b", 10)
+
+		for _, id := range []PeerID{"node-b", "node-c"} {
+			n := c.nodes[id]
+			n.mu.Lock()
+			role := n.role
+			term := n.persistent.CurrentTerm
+			n.mu.Unlock()
+
+			wantRole := Follower
+			if id == "node-b" {
+				wantRole = Leader
+			}
+
+			if role != wantRole || term != 2 {
+				t.Fatalf(
+					"%s after replacement election: role=%v term=%d, "+
+						"want role=%v term=2",
+					id, role, term, wantRole,
+				)
+			}
+		}
+
+		submit("node-b", "set y=2")
+		c.advance(t, "node-b", 2)
+
+		// Reconstruct A through New using its original data directory.
+		c.restartNode(t, "node-a")
+
+		a := c.nodes["node-a"]
+
+		a.mu.Lock()
+		loaded := a.persistent
+		role := a.role
+		commitIndex := a.volatile.CommitIndex
+		lastApplied := a.volatile.LastApplied
+		a.mu.Unlock()
+
+		wantLoadedLog := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 1, Index: 2, Command: []byte("set x=1")},
+		}
+
+		if loaded.CurrentTerm != 1 || loaded.VotedFor != "node-a" {
+			t.Fatalf(
+				"reloaded persistent state: term=%d vote=%q, "+
+					"want term=1 vote=node-a",
+				loaded.CurrentTerm, loaded.VotedFor,
+			)
+		}
+		if !reflect.DeepEqual(loaded.Log, wantLoadedLog) {
+			t.Fatalf(
+				"reloaded log: got %+v, want %+v",
+				loaded.Log, wantLoadedLog,
+			)
+		}
+		if role != Follower || commitIndex != 0 || lastApplied != 0 {
+			t.Fatalf(
+				"restart volatile state: role=%v commit=%d applied=%d, "+
+					"want follower and zero indices",
+				role, commitIndex, lastApplied,
+			)
+		}
+
+		// B supplies the missing suffix and its current commit index.
+		c.advance(t, "node-b", 2)
+
+		a.mu.Lock()
+		role = a.role
+		term := a.persistent.CurrentTerm
+		a.mu.Unlock()
+
+		if role != Follower || term != 2 {
+			t.Fatalf(
+				"recovered A: role=%v term=%d, want follower term 2",
+				role, term,
+			)
+		}
+
+		want := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 1, Index: 2, Command: []byte("set x=1")},
+			{Term: 2, Index: 3},
+			{Term: 2, Index: 4, Command: []byte("set y=2")},
+		}
+
+		for _, id := range []PeerID{"node-a", "node-b", "node-c"} {
+			n := c.nodes[id]
+
+			// A rebuilds a fresh application from index 1.
+			// B and C retain their original queued application history.
+			for _, expected := range want {
+				select {
+				case got := <-n.applyCh:
+					if !reflect.DeepEqual(got, expected) {
+						t.Fatalf(
+							"%s applied %+v, want %+v",
+							id, got, expected,
+						)
+					}
+				default:
+					t.Fatalf("%s did not apply index %d", id, expected.Index)
+				}
+			}
+
+			select {
+			case extra := <-n.applyCh:
+				t.Fatalf("%s applied unexpected extra entry: %+v", id, extra)
+			default:
+			}
+
+			n.mu.Lock()
+			commitIndex := n.volatile.CommitIndex
+			lastApplied := n.volatile.LastApplied
+			n.mu.Unlock()
+
+			if commitIndex != 4 || lastApplied != 4 {
+				t.Errorf(
+					"%s: commit=%d applied=%d, want both 4",
+					id, commitIndex, lastApplied,
+				)
+			}
+
+			persisted, err := n.storage.Load()
+			if err != nil {
+				t.Fatalf("%s load storage: %v", id, err)
+			}
+			if !reflect.DeepEqual(persisted.Log, want) {
+				t.Errorf(
+					"%s persisted log: got %+v, want %+v",
+					id, persisted.Log, want,
+				)
 			}
 		}
 	})

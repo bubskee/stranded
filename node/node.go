@@ -78,8 +78,13 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 		case event := <-appendReplies:
-			if err := n.handleAppendEntriesReply(event); err != nil {
+			retry, err := n.handleAppendEntriesReply(event)
+			if err != nil {
 				return err
+			}
+
+			if retry {
+				n.sendAppendEntries(ctx, event.peer, appendReplies)
 			}
 
 		// RequestVote case

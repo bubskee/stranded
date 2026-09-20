@@ -827,3 +827,128 @@ func TestLeaderAppliesEntryAfterQuorumCommit(t *testing.T) {
 		}
 	})
 }
+
+func TestLeaderCurrentTermNoOpCommitsPriorTermEntry(t *testing.T) {
+	n := &Node{
+		cfg: Config{
+			ID: "node-a",
+			Peers: map[PeerID]string{
+				"node-b": "",
+				"node-c": "",
+			},
+		},
+		role: Candidate,
+		persistent: PersistentState{
+			CurrentTerm: 3,
+			VotedFor:    "node-a",
+			Log: []LogEntry{
+				{
+					Term:    2,
+					Index:   1,
+					Command: []byte("old-term-command"),
+				},
+			},
+		},
+		candidateState: &CandidateState{
+			Votes: map[PeerID]bool{
+				"node-a": true,
+			},
+		},
+		storage: &memoryStorage{},
+	}
+
+	result, err := n.handleVoteReply(
+		"node-b",
+		3,
+		&RequestVoteReply{
+			Term:        3,
+			VoteGranted: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("handle vote reply: %v", err)
+	}
+
+	if !result.becameLeader {
+		t.Fatal("vote quorum did not make candidate leader")
+	}
+
+	n.mu.Lock()
+
+	if n.role != Leader {
+		n.mu.Unlock()
+		t.Fatalf("role: got %s, want leader", n.role)
+	}
+
+	log := append([]LogEntry(nil), n.persistent.Log...)
+
+	n.mu.Unlock()
+
+	wantLog := []LogEntry{
+		{
+			Term:    2,
+			Index:   1,
+			Command: []byte("old-term-command"),
+		},
+		{
+			Term:  3,
+			Index: 2,
+		},
+	}
+
+	if !reflect.DeepEqual(log, wantLog) {
+		t.Fatalf("leader log: got %+v, want %+v", log, wantLog)
+	}
+
+	// Model node-b as already having the old term-2 entry.
+	// A + B is a majority, but Raft must not commit an old-term
+	// entry from replica count alone.
+	n.mu.Lock()
+	n.leaderState.MatchIndex["node-b"] = 1
+	advanced := n.advanceLeaderCommitLocked()
+	commitIndex := n.volatile.CommitIndex
+	n.mu.Unlock()
+
+	if advanced {
+		t.Fatal("old-term entry advanced commit index")
+	}
+
+	if commitIndex != 0 {
+		t.Fatalf(
+			"old-term entry committed from replica count alone: got %d, want 0",
+			commitIndex,
+		)
+	}
+
+	// Once B has also replicated the leader's term-3 no-op,
+	// the current-term entry may be committed. That commitment
+	// also commits the preceding term-2 entry.
+	result2, err := n.handleAppendEntriesReply(appendReplyEvent{
+		peer:       "node-b",
+		sentTerm:   3,
+		nextIndex:  2,
+		matchIndex: 2,
+		reply: AppendEntriesReply{
+			Term:    3,
+			Success: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle AppendEntries reply: %v", err)
+	}
+
+	if !result2.commitAdvanced {
+		t.Fatal("current-term no-op replication did not advance commit index")
+	}
+
+	n.mu.Lock()
+	commitIndex = n.volatile.CommitIndex
+	n.mu.Unlock()
+
+	if commitIndex != 2 {
+		t.Fatalf(
+			"commit index after current-term no-op: got %d, want 2",
+			commitIndex,
+		)
+	}
+}

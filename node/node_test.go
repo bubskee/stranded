@@ -279,6 +279,7 @@ func TestGrantedRequestVoteResetsElectionTimer(t *testing.T) {
 				ID:                 "node-a",
 				ElectionTimeoutMin: 100 * time.Millisecond,
 				ElectionTimeoutMax: 100 * time.Millisecond,
+				TickInterval:       10 * time.Millisecond,
 			},
 			role: Follower,
 			persistent: PersistentState{
@@ -288,12 +289,24 @@ func TestGrantedRequestVoteResetsElectionTimer(t *testing.T) {
 			requestVoteCh: make(chan requestVoteCall),
 		}
 
+		ticks := make(chan time.Time)
+
 		go func() {
-			_ = n.Run(ctx)
+			_ = n.run(ctx, ticks)
 		}()
 
-		// Approach the original election deadline.
-		time.Sleep(75 * time.Millisecond)
+		advance := func(count int) {
+			t.Helper()
+
+			for range count {
+				ticks <- time.Time{}
+				synctest.Wait()
+			}
+		}
+
+		// Process seven ticks before resetting the election timeout.
+		advance(7)
+		synctest.Wait()
 
 		reply, err := n.submitRequestVote(ctx, RequestVoteArgs{
 			Term:        3,
@@ -307,8 +320,8 @@ func TestGrantedRequestVoteResetsElectionTimer(t *testing.T) {
 			t.Fatal("eligible RequestVote was not granted")
 		}
 
-		// Reach the original deadline: only 25ms have elapsed since granting.
-		time.Sleep(25 * time.Millisecond)
+		// Original deadline: three ticks since the reset.
+		advance(3)
 		synctest.Wait()
 
 		n.mu.Lock()
@@ -324,8 +337,8 @@ func TestGrantedRequestVoteResetsElectionTimer(t *testing.T) {
 			t.Errorf("term at old election deadline: got %d, want 3", term)
 		}
 
-		// Still immediately before the new deadline.
-		time.Sleep(74 * time.Millisecond)
+		// Nine ticks since reset; the tenth has not arrived.
+		advance(6)
 		synctest.Wait()
 
 		n.mu.Lock()
@@ -337,7 +350,7 @@ func TestGrantedRequestVoteResetsElectionTimer(t *testing.T) {
 		}
 
 		// 100ms since the granted vote: election may now begin.
-		time.Sleep(time.Millisecond)
+		advance(1)
 		synctest.Wait()
 
 		n.mu.Lock()
@@ -491,6 +504,7 @@ func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
 				ID:                 "node-a",
 				ElectionTimeoutMin: 100 * time.Millisecond,
 				ElectionTimeoutMax: 100 * time.Millisecond,
+				TickInterval:       10 * time.Millisecond,
 			},
 			role: Follower,
 			persistent: PersistentState{
@@ -500,12 +514,24 @@ func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
 			appendEntriesCh: make(chan appendEntriesCall),
 		}
 
+		ticks := make(chan time.Time)
+
 		go func() {
-			_ = n.Run(ctx)
+			_ = n.run(ctx, ticks)
 		}()
 
-		// Approach the original election deadline.
-		time.Sleep(75 * time.Millisecond)
+		advance := func(count int) {
+			t.Helper()
+
+			for range count {
+				ticks <- time.Time{}
+				synctest.Wait()
+			}
+		}
+
+		// Process seven ticks before resetting the election timeout.
+		advance(7)
+		synctest.Wait()
 
 		_, err := n.submitAppendEntries(ctx, AppendEntriesArgs{
 			Term:     3,
@@ -515,8 +541,8 @@ func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
 			t.Fatalf("submit AppendEntries: %v", err)
 		}
 
-		// Original deadline. Only 25ms since leader contact.
-		time.Sleep(25 * time.Millisecond)
+		// Original deadline: three ticks since the reset.
+		advance(3)
 		synctest.Wait()
 
 		n.mu.Lock()
@@ -532,8 +558,8 @@ func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
 			t.Errorf("term at old election deadline: got %d, want 3", term)
 		}
 
-		// Still immediately before the reset deadline.
-		time.Sleep(74 * time.Millisecond)
+		// Nine ticks since reset; the tenth has not arrived.
+		advance(6)
 		synctest.Wait()
 
 		n.mu.Lock()
@@ -545,7 +571,7 @@ func TestCurrentTermAppendEntriesResetsElectionTimer(t *testing.T) {
 		}
 
 		// 100ms since AppendEntries: election may now begin.
-		time.Sleep(time.Millisecond)
+		advance(1)
 		synctest.Wait()
 
 		n.mu.Lock()

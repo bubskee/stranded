@@ -205,6 +205,9 @@ func (n *Node) becomeLeaderLocked() error {
 	n.candidateState = nil
 	n.leaderState = leaderState
 
+	n.electionElapsed = 0
+	n.heartbeatElapsed = 0
+
 	return nil
 }
 
@@ -228,6 +231,9 @@ func (n *Node) becomeFollowerLocked(
 	n.role = Follower
 	n.candidateState = nil
 	n.leaderState = nil
+
+	n.resetElectionTimeoutLocked()
+	n.heartbeatElapsed = 0
 
 	return pending, nil
 }

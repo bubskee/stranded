@@ -673,3 +673,100 @@ func TestRunStorageFailureFailsPendingClientRequests(t *testing.T) {
 		}
 	})
 }
+
+func TestIdleLeaderSendsPeriodicHeartbeatsWithoutStartingElection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		transport := newGatedClientAppendTransport()
+		close(transport.release) // Acknowledge each heartbeat immediately.
+
+		persistent := PersistentState{
+			CurrentTerm: 3,
+			VotedFor:    "node-a",
+			Log: []LogEntry{
+				{Term: 3, Index: 1},
+			},
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+				HeartbeatInterval:  20 * time.Millisecond,
+			},
+			role:       Leader,
+			persistent: persistent,
+			volatile: VolatileState{
+				CommitIndex: 1,
+				LastApplied: 1,
+			},
+			leaderState: &LeaderState{
+				NextIndex: map[PeerID]uint64{
+					"node-b": 2,
+				},
+				MatchIndex: map[PeerID]uint64{
+					"node-b": 1,
+				},
+			},
+			storage:   &memoryStorage{state: persistent},
+			transport: transport,
+		}
+
+		runDone := make(chan error, 1)
+		go func() {
+			runDone <- n.Run(ctx)
+		}()
+
+		synctest.Wait()
+
+		// Six heartbeat intervals carry us past the election timeout.
+		for beat := 1; beat <= 6; beat++ {
+			time.Sleep(20 * time.Millisecond)
+			synctest.Wait()
+
+			select {
+			case call := <-transport.calls:
+				if call.Term != 3 {
+					t.Fatalf("heartbeat %d: term got %d, want 3", beat, call.Term)
+				}
+				if len(call.Entries) != 0 {
+					t.Fatalf("heartbeat %d: unexpected entries", beat)
+				}
+				if call.PrevLogIndex != 1 || call.PrevLogTerm != 3 {
+					t.Fatalf("heartbeat %d: wrong log anchor: %+v", beat, call)
+				}
+				if call.LeaderCommit != 1 {
+					t.Fatalf(
+						"heartbeat %d: LeaderCommit got %d, want 1",
+						beat, call.LeaderCommit,
+					)
+				}
+			default:
+				t.Fatalf("heartbeat %d was not sent", beat)
+			}
+
+			n.mu.Lock()
+			role := n.role
+			term := n.persistent.CurrentTerm
+			n.mu.Unlock()
+
+			if role != Leader || term != 3 {
+				t.Fatalf(
+					"after heartbeat %d: role=%v term=%d",
+					beat, role, term,
+				)
+			}
+		}
+
+		cancel()
+		if err := <-runDone; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, want context.Canceled", err)
+		}
+	})
+}

@@ -22,6 +22,10 @@ type Node struct {
 	storage   Storage
 	transport Transport
 
+	electionElapsed         int
+	heartbeatElapsed        int
+	randomizedElectionTicks int
+
 	electionTimer         *time.Timer
 	pendingClientRequests map[uint64]chan clientRequestResult
 
@@ -56,6 +60,13 @@ func New(cfg Config) (*Node, error) {
 }
 
 func (n *Node) Run(ctx context.Context) error {
+	ticker := time.NewTicker(n.tickInterval())
+	defer ticker.Stop()
+
+	return n.run(ctx, ticker.C)
+}
+
+func (n *Node) run(ctx context.Context, ticks <-chan time.Time) error {
 	defer func() {
 		n.mu.Lock()
 		pending := n.takePendingClientRequestsLocked()
@@ -64,7 +75,7 @@ func (n *Node) Run(ctx context.Context) error {
 		failClientRequests(pending)
 	}()
 
-	n.resetElectionTimer()
+	n.resetElectionTimeout()
 
 	voteReplies := make(chan voteReplyEvent)
 	appendReplies := make(chan appendReplyEvent)
@@ -153,7 +164,7 @@ func (n *Node) Run(ctx context.Context) error {
 			failClientRequests(result.failedClients)
 
 			if err == nil && result.reply.VoteGranted {
-				n.resetElectionTimer()
+				n.resetElectionTimeout()
 			}
 
 			call.reply <- requestVoteResult{
@@ -172,7 +183,7 @@ func (n *Node) Run(ctx context.Context) error {
 			failClientRequests(result.failedClients)
 
 			if err == nil && call.args.Term >= result.reply.Term {
-				n.resetElectionTimer()
+				n.resetElectionTimeout()
 			}
 
 			if err == nil && result.reply.Success {
@@ -188,14 +199,21 @@ func (n *Node) Run(ctx context.Context) error {
 				return err
 			}
 
-		case <-n.electionTimer.C:
-			e, err := n.startElection()
-			if err != nil {
-				return err
+		case <-ticks:
+			result := n.tick()
+
+			if result.sendHeartbeat {
+				n.sendAppendEntriesToAll(ctx, appendReplies)
 			}
 
-			n.resetElectionTimer()
-			n.sendRequestVotes(ctx, e, voteReplies)
+			if result.startElection {
+				e, err := n.startElection()
+				if err != nil {
+					return err
+				}
+
+				n.sendRequestVotes(ctx, e, voteReplies)
+			}
 		}
 	}
 }

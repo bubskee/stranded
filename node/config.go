@@ -12,4 +12,6 @@ type Config struct {
 	ElectionTimeoutMin time.Duration
 	ElectionTimeoutMax time.Duration
 	HeartbeatInterval  time.Duration
+
+	TickInterval time.Duration
 }

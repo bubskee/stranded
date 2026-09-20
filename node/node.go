@@ -225,3 +225,7 @@ func NewWithTransport(cfg Config, transport Transport) (*Node, error) {
 	n.transport = transport
 	return n, nil
 }
+
+func (n *Node) ApplyCh() <-chan LogEntry {
+	return n.applyCh
+}

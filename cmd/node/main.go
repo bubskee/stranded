@@ -150,6 +150,32 @@ func run() error {
 		serveErr <- server.Serve(listener)
 	}()
 
+	go func() {
+		for {
+			select {
+			case entry := <-n.ApplyCh():
+				if entry.Command == nil {
+					log.Printf(
+						"applied no-op: term=%d index=%d",
+						entry.Term,
+						entry.Index,
+					)
+					continue
+				}
+
+				log.Printf(
+					"applied command: term=%d index=%d command=%q",
+					entry.Term,
+					entry.Index,
+					entry.Command,
+				)
+
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	nodeErr := make(chan error, 1)
 	go func() {
 		nodeErr <- n.Run(ctx)

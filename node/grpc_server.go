@@ -65,8 +65,17 @@ func (s *grpcServer) AppendEntries(
 	}, nil
 }
 
-func (s *grpcServer) ClientRequest(ctx context.Context, args *raftpb.SubmitCommandRequest) (*raftpb.SubmitCommandResponse, error) {
-	// TODO: if not leader, reply success=false with leader_hint set
-	// TODO: if leader, append to log, replicate, wait for commit, reply
-	return nil, nil
+func (s *grpcServer) SubmitCommand(
+	ctx context.Context,
+	req *raftpb.SubmitCommandRequest,
+) (*raftpb.SubmitCommandResponse, error) {
+	result, err := s.node.submitClientRequest(ctx, req.Command)
+	if err != nil {
+		return nil, err
+	}
+
+	return &raftpb.SubmitCommandResponse{
+		Success:    result.success,
+		LeaderHint: string(result.leaderHint),
+	}, nil
 }

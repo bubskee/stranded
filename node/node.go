@@ -27,6 +27,7 @@ type Node struct {
 	applyCh         chan LogEntry
 	requestVoteCh   chan requestVoteCall
 	appendEntriesCh chan appendEntriesCall
+	clientRequestCh chan clientRequestCall
 }
 
 func New(cfg Config) (*Node, error) {
@@ -49,6 +50,7 @@ func New(cfg Config) (*Node, error) {
 		applyCh:         make(chan LogEntry),
 		requestVoteCh:   make(chan requestVoteCall),
 		appendEntriesCh: make(chan appendEntriesCall),
+		clientRequestCh: make(chan clientRequestCall),
 	}, nil
 }
 
@@ -62,6 +64,23 @@ func (n *Node) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+
+		case call := <-n.clientRequestCh:
+			n.mu.Lock()
+			role := n.role
+			n.mu.Unlock()
+
+			if role != Leader {
+				call.reply <- clientRequestResult{
+					success: false,
+				}
+				continue
+			}
+
+			// Leader handling comes in the next red.
+			call.reply <- clientRequestResult{
+				success: false,
+			}
 
 		case event := <-voteReplies:
 			becameLeader, err := n.handleVoteReply(

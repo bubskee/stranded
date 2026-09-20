@@ -124,3 +124,53 @@ func TestGRPCAppendEntriesRoutesThroughNode(t *testing.T) {
 		}
 	})
 }
+
+func TestGRPCSubmitCommandRejectsOnFollower(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		n, err := New(Config{
+			ID:                 "node-a",
+			DataDir:            t.TempDir(),
+			ElectionTimeoutMin: time.Second,
+			ElectionTimeoutMax: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		server := &grpcServer{node: n}
+
+		reply, err := server.SubmitCommand(
+			ctx,
+			&raftpb.SubmitCommandRequest{
+				ClientId:  "client-1",
+				RequestId: 1,
+				Command:   []byte("set x=1"),
+			},
+		)
+		if err != nil {
+			t.Fatalf("SubmitCommand: %v", err)
+		}
+
+		if reply.Success {
+			t.Fatal("follower accepted client command")
+		}
+
+		n.mu.Lock()
+		log := append([]LogEntry(nil), n.persistent.Log...)
+		n.mu.Unlock()
+
+		if len(log) != 0 {
+			t.Errorf(
+				"follower log changed after client command: got %+v, want empty",
+				log,
+			)
+		}
+	})
+}

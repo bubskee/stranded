@@ -1089,7 +1089,13 @@ func TestLeaderSendsInitialHeartbeatAfterElection(t *testing.T) {
 			LeaderID:     "node-a",
 			PrevLogIndex: 0,
 			PrevLogTerm:  0,
-			Entries:      nil,
+			Entries: []LogEntry{
+				{
+					Term:    1,
+					Index:   1,
+					Command: nil,
+				},
+			},
 			LeaderCommit: 0,
 		}
 

@@ -62,7 +62,9 @@ func (n *Node) startElection() (election, error) {
 	}
 
 	if n.hasElectionQuorumLocked() {
-		n.becomeLeaderLocked()
+		if err := n.becomeLeaderLocked(); err != nil {
+			return election{}, err
+		}
 	}
 
 	return e, nil
@@ -127,7 +129,9 @@ func (n *Node) handleVoteReply(
 	n.candidateState.Votes[peer] = reply.VoteGranted
 
 	if n.hasElectionQuorumLocked() {
-		n.becomeLeaderLocked()
+		if err := n.becomeLeaderLocked(); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
 
@@ -148,24 +152,40 @@ func (n *Node) hasElectionQuorumLocked() bool {
 	return granted >= quorum
 }
 
-func (n *Node) becomeLeaderLocked() {
-	n.role = Leader
-	n.candidateState = nil
-
-	lastIndex := uint64(0)
+func (n *Node) becomeLeaderLocked() error {
+	oldLastIndex := uint64(0)
 	if len(n.persistent.Log) > 0 {
-		lastIndex = n.persistent.Log[len(n.persistent.Log)-1].Index
+		oldLastIndex = n.persistent.Log[len(n.persistent.Log)-1].Index
 	}
 
-	n.leaderState = &LeaderState{
+	leaderState := &LeaderState{
 		NextIndex:  make(map[PeerID]uint64, len(n.cfg.Peers)),
 		MatchIndex: make(map[PeerID]uint64, len(n.cfg.Peers)),
 	}
 
 	for peer := range n.cfg.Peers {
-		n.leaderState.NextIndex[peer] = lastIndex + 1
-		n.leaderState.MatchIndex[peer] = 0
+		leaderState.NextIndex[peer] = oldLastIndex + 1
+		leaderState.MatchIndex[peer] = 0
 	}
+
+	next := n.persistent
+	next.Log = append([]LogEntry(nil), n.persistent.Log...)
+	next.Log = append(next.Log, LogEntry{
+		Term:  n.persistent.CurrentTerm,
+		Index: oldLastIndex + 1,
+		// Command nil => no-op for now.
+	})
+
+	if err := n.storage.Save(next); err != nil {
+		return err
+	}
+
+	n.persistent = next
+	n.role = Leader
+	n.candidateState = nil
+	n.leaderState = leaderState
+
+	return nil
 }
 
 func (n *Node) becomeFollowerLocked(term uint64) error {

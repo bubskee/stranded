@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -159,12 +160,12 @@ func TestSuccessfulAppendEntriesReplyAdvancesFollowerProgress(t *testing.T) {
 			t.Fatalf("role after election: got %s, want leader", role)
 		}
 
-		if matchIndex != 2 {
-			t.Errorf("match index after successful AppendEntries: got %d, want 2", matchIndex)
+		if matchIndex != 3 {
+			t.Errorf("match index after successful AppendEntries: got %d, want 3", matchIndex)
 		}
 
-		if nextIndex != 3 {
-			t.Errorf("next index after successful AppendEntries: got %d, want 3", nextIndex)
+		if nextIndex != 4 {
+			t.Errorf("next index after successful AppendEntries: got %d, want 4", nextIndex)
 		}
 	})
 }
@@ -389,11 +390,19 @@ func TestFailedAppendEntriesBacksUpAndRetries(t *testing.T) {
 			)
 		}
 
-		if !reflect.DeepEqual(second.Entries, []LogEntry{entry2}) {
+		wantEntries := []LogEntry{
+			entry2,
+			{
+				Term:  1,
+				Index: 3,
+			},
+		}
+
+		if !reflect.DeepEqual(second.Entries, wantEntries) {
 			t.Errorf(
 				"retry entries: got %+v, want %+v",
 				second.Entries,
-				[]LogEntry{entry2},
+				wantEntries,
 			)
 		}
 	})
@@ -564,4 +573,230 @@ func TestLeaderDoesNotCommitOldTermEntryFromReplicaCountAlone(t *testing.T) {
 			commitIndex,
 		)
 	}
+}
+
+func TestLeaderAppendsCurrentTermNoOpOnElection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		transport := newLeaderHeartbeatTransport()
+		storage := &memoryStorage{}
+
+		n := &Node{
+			cfg: Config{
+				ID: "node-a",
+				Peers: map[PeerID]string{
+					"node-b": "",
+				},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			transport: transport,
+			storage:   storage,
+		}
+
+		go func() {
+			_ = n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		log := append([]LogEntry(nil), n.persistent.Log...)
+		n.mu.Unlock()
+
+		if role != Leader {
+			t.Fatalf("role after election: got %s, want leader", role)
+		}
+
+		if term != 1 {
+			t.Fatalf("term after election: got %d, want 1", term)
+		}
+
+		if len(log) != 1 {
+			t.Fatalf("log entries after becoming leader: got %d, want 1", len(log))
+		}
+
+		got := log[0]
+
+		if got.Term != 1 {
+			t.Errorf("no-op term: got %d, want 1", got.Term)
+		}
+
+		if got.Index != 1 {
+			t.Errorf("no-op index: got %d, want 1", got.Index)
+		}
+
+		if got.Command != nil {
+			t.Errorf("no-op command: got %q, want nil", got.Command)
+		}
+
+		storage.mu.Lock()
+		persisted := storage.state
+		storage.mu.Unlock()
+
+		if len(persisted.Log) != 1 {
+			t.Fatalf(
+				"persisted log entries after becoming leader: got %d, want 1",
+				len(persisted.Log),
+			)
+		}
+
+		if !reflect.DeepEqual(persisted.Log[0], got) {
+			t.Errorf(
+				"persisted no-op: got %+v, want %+v",
+				persisted.Log[0],
+				got,
+			)
+		}
+	})
+}
+
+type failSecondSaveStorage struct {
+	mu    sync.Mutex
+	state PersistentState
+	saves int
+	err   error
+}
+
+func (s *failSecondSaveStorage) Load() (PersistentState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state, nil
+}
+
+func (s *failSecondSaveStorage) Save(state PersistentState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.saves++
+
+	if s.saves == 2 {
+		return s.err
+	}
+
+	s.state = state
+	return nil
+}
+
+func TestLeaderNoOpPersistenceFailurePreventsBecomingLeader(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		persistErr := errors.New("disk exploded")
+
+		storage := &failSecondSaveStorage{
+			err: persistErr,
+		}
+
+		n := &Node{
+			cfg: Config{
+				ID:                 "node-a",
+				Peers:              map[PeerID]string{},
+				ElectionTimeoutMin: 100 * time.Millisecond,
+				ElectionTimeoutMax: 100 * time.Millisecond,
+			},
+			storage: storage,
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- n.Run(ctx)
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+
+		select {
+		case err := <-runErr:
+			if !errors.Is(err, persistErr) {
+				t.Fatalf("Run error: got %v, want %v", err, persistErr)
+			}
+		default:
+			t.Fatal("Run did not return leader no-op persistence error")
+		}
+
+		n.mu.Lock()
+		role := n.role
+		term := n.persistent.CurrentTerm
+		votedFor := n.persistent.VotedFor
+		log := append([]LogEntry(nil), n.persistent.Log...)
+		candidateState := n.candidateState
+		leaderState := n.leaderState
+		n.mu.Unlock()
+
+		if role != Candidate {
+			t.Errorf(
+				"role after no-op persistence failure: got %s, want candidate",
+				role,
+			)
+		}
+
+		if term != 1 {
+			t.Errorf("term after no-op persistence failure: got %d, want 1", term)
+		}
+
+		if votedFor != "node-a" {
+			t.Errorf(
+				"vote after no-op persistence failure: got %q, want %q",
+				votedFor,
+				"node-a",
+			)
+		}
+
+		if len(log) != 0 {
+			t.Errorf(
+				"log published after no-op persistence failure: got %+v, want empty",
+				log,
+			)
+		}
+
+		if candidateState == nil {
+			t.Error("candidate state cleared after no-op persistence failure")
+		}
+
+		if leaderState != nil {
+			t.Errorf(
+				"leader state published after no-op persistence failure: got %+v, want nil",
+				leaderState,
+			)
+		}
+
+		storage.mu.Lock()
+		saves := storage.saves
+		persisted := storage.state
+		storage.mu.Unlock()
+
+		if saves != 2 {
+			t.Errorf("Save calls: got %d, want 2", saves)
+		}
+
+		if persisted.CurrentTerm != 1 {
+			t.Errorf(
+				"persisted term after failure: got %d, want 1",
+				persisted.CurrentTerm,
+			)
+		}
+
+		if persisted.VotedFor != "node-a" {
+			t.Errorf(
+				"persisted vote after failure: got %q, want %q",
+				persisted.VotedFor,
+				"node-a",
+			)
+		}
+
+		if len(persisted.Log) != 0 {
+			t.Errorf(
+				"no-op persisted despite failed save: got %+v",
+				persisted.Log,
+			)
+		}
+	})
 }

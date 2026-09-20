@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -12,6 +13,18 @@ import (
 type clusterTransport struct {
 	nodes    map[PeerID]*Node
 	contexts map[PeerID]context.Context
+
+	mu       sync.RWMutex
+	isolated map[PeerID]bool
+}
+
+var errClusterPartition = errors.New("cluster link partitioned")
+
+func (tr *clusterTransport) partitioned(from, to PeerID) bool {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+
+	return tr.isolated[from] || tr.isolated[to]
 }
 
 func (tr *clusterTransport) RequestVote(
@@ -19,6 +32,10 @@ func (tr *clusterTransport) RequestVote(
 	peer PeerID,
 	args *RequestVoteArgs,
 ) (*RequestVoteReply, error) {
+	if tr.partitioned(args.CandidateID, peer) {
+		return nil, errClusterPartition
+	}
+
 	callCtx, cancel := tr.callContext(ctx, peer)
 	defer cancel()
 
@@ -31,6 +48,10 @@ func (tr *clusterTransport) AppendEntries(
 	peer PeerID,
 	args *AppendEntriesArgs,
 ) (*AppendEntriesReply, error) {
+	if tr.partitioned(args.LeaderID, peer) {
+		return nil, errClusterPartition
+	}
+
 	callCtx, cancel := tr.callContext(ctx, peer)
 	defer cancel()
 
@@ -66,6 +87,8 @@ type testCluster struct {
 	done         map[PeerID]chan error
 	nodeContexts map[PeerID]context.Context
 	nodeCancels  map[PeerID]context.CancelFunc
+
+	transport *clusterTransport
 }
 
 // Call inside synctest.Test.
@@ -85,7 +108,9 @@ func newTestCluster(ids ...PeerID) *testCluster {
 	transport := &clusterTransport{
 		nodes:    c.nodes,
 		contexts: c.nodeContexts,
+		isolated: make(map[PeerID]bool),
 	}
+	c.transport = transport
 
 	// Finish building the shared routing map before starting any node.
 	for _, id := range ids {
@@ -175,6 +200,22 @@ func (c *testCluster) stopNode(t *testing.T, id PeerID) {
 	}
 
 	synctest.Wait()
+}
+
+func (c *testCluster) isolate(id PeerID) {
+	synctest.Wait()
+
+	c.transport.mu.Lock()
+	c.transport.isolated[id] = true
+	c.transport.mu.Unlock()
+}
+
+func (c *testCluster) heal(id PeerID) {
+	synctest.Wait()
+
+	c.transport.mu.Lock()
+	delete(c.transport.isolated, id)
+	c.transport.mu.Unlock()
 }
 
 // SCENARIOS
@@ -518,6 +559,173 @@ func TestClusterWithoutQuorumDoesNotCommitClientCommand(t *testing.T) {
 
 		if remaining := len(leader.pendingClientRequests); remaining != 0 {
 			t.Errorf("pending requests after shutdown: got %d, want 0", remaining)
+		}
+	})
+}
+
+func TestClusterHealsPartitionAndReplacesUncommittedSuffix(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestCluster("node-a", "node-b", "node-c")
+		defer c.stop(t)
+
+		startClient := func(id PeerID, command string) <-chan clientRequestResult {
+			done := make(chan clientRequestResult, 1)
+			go func() {
+				result, err := c.nodes[id].submitClientRequest(
+					c.ctx,
+					[]byte(command),
+				)
+				result.err = err
+				done <- result
+			}()
+			return done
+		}
+
+		// Establish the shared term-1 no-op.
+		c.advance(t, "node-a", 10)
+		c.advance(t, "node-a", 2)
+
+		c.isolate("node-a")
+
+		// A accepts locally, but cannot replicate to a majority.
+		oldClient := startClient("node-a", "set x=old")
+		synctest.Wait()
+
+		select {
+		case result := <-oldClient:
+			t.Fatalf("isolated leader completed client request: %+v", result)
+		default:
+		}
+
+		oldState, err := c.nodes["node-a"].storage.Load()
+		if err != nil {
+			t.Fatalf("load isolated leader storage: %v", err)
+		}
+
+		wantOldLog := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 1, Index: 2, Command: []byte("set x=old")},
+		}
+		if !reflect.DeepEqual(oldState.Log, wantOldLog) {
+			t.Fatalf(
+				"isolated leader log: got %+v, want %+v",
+				oldState.Log, wantOldLog,
+			)
+		}
+
+		// B and C can elect a new leader without A.
+		c.advance(t, "node-b", 10)
+
+		b := c.nodes["node-b"]
+		b.mu.Lock()
+		role := b.role
+		term := b.persistent.CurrentTerm
+		b.mu.Unlock()
+
+		if role != Leader || term != 2 {
+			t.Fatalf("replacement leader: role=%v term=%d, want leader term 2", role, term)
+		}
+
+		newClient := startClient("node-b", "set x=new")
+		synctest.Wait()
+
+		select {
+		case result := <-newClient:
+			if result.err != nil || !result.success {
+				t.Fatalf("majority-side client failed: %+v", result)
+			}
+		default:
+			t.Fatal("majority-side client did not complete")
+		}
+
+		c.advance(t, "node-b", 2)
+
+		// A still cannot know about B's election.
+		select {
+		case result := <-oldClient:
+			t.Fatalf("isolated client completed before healing: %+v", result)
+		default:
+		}
+
+		c.heal("node-a")
+		c.advance(t, "node-b", 2)
+
+		// Higher-term contact makes A relinquish its pending client.
+		select {
+		case result := <-oldClient:
+			if result.success {
+				t.Fatal("overwritten client command reported success")
+			}
+		default:
+			t.Fatal("old leader did not resolve pending client after healing")
+		}
+
+		want := []LogEntry{
+			{Term: 1, Index: 1},
+			{Term: 2, Index: 2}, // B's no-op replaces A's command.
+			{Term: 2, Index: 3, Command: []byte("set x=new")},
+		}
+
+		for id, n := range c.nodes {
+			n.mu.Lock()
+			role := n.role
+			term := n.persistent.CurrentTerm
+			commitIndex := n.volatile.CommitIndex
+			lastApplied := n.volatile.LastApplied
+			pending := len(n.pendingClientRequests)
+			n.mu.Unlock()
+
+			wantRole := Follower
+			if id == "node-b" {
+				wantRole = Leader
+			}
+
+			if role != wantRole || term != 2 {
+				t.Errorf(
+					"%s after healing: role=%v term=%d, want role=%v term=2",
+					id, role, term, wantRole,
+				)
+			}
+			if commitIndex != 3 || lastApplied != 3 {
+				t.Errorf(
+					"%s after healing: commit=%d applied=%d, want both 3",
+					id, commitIndex, lastApplied,
+				)
+			}
+			if pending != 0 {
+				t.Errorf("%s pending requests: got %d, want 0", id, pending)
+			}
+
+			persisted, err := n.storage.Load()
+			if err != nil {
+				t.Fatalf("%s load storage: %v", id, err)
+			}
+			if !reflect.DeepEqual(persisted.Log, want) {
+				t.Errorf(
+					"%s persisted log: got %+v, want %+v",
+					id, persisted.Log, want,
+				)
+			}
+
+			for _, expected := range want {
+				select {
+				case got := <-n.applyCh:
+					if !reflect.DeepEqual(got, expected) {
+						t.Fatalf(
+							"%s applied %+v, want %+v",
+							id, got, expected,
+						)
+					}
+				default:
+					t.Fatalf("%s did not apply index %d", id, expected.Index)
+				}
+			}
+
+			select {
+			case extra := <-n.applyCh:
+				t.Fatalf("%s applied unexpected extra entry: %+v", id, extra)
+			default:
+			}
 		}
 	})
 }

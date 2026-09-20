@@ -56,6 +56,7 @@ func (n *Node) Run(ctx context.Context) error {
 	n.resetElectionTimer()
 
 	voteReplies := make(chan voteReplyEvent)
+	appendReplies := make(chan appendReplyEvent)
 
 	for {
 		select {
@@ -73,7 +74,12 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 
 			if becameLeader {
-				n.sendInitialHeartbeats(ctx)
+				n.sendInitialHeartbeats(ctx, appendReplies)
+			}
+
+		case event := <-appendReplies:
+			if err := n.handleAppendEntriesReply(event); err != nil {
+				return err
 			}
 
 		// RequestVote case

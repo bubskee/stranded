@@ -123,3 +123,40 @@ power-loss fault injection; replay assumes a fresh application.
 
 CLI/process wiring, production hardening, and exactly-once external effects
 remain outside this milestone. Today's planned v0 work is complete.
+
+## post-v0.1 red-team / hardening
+
+Ran the completed repository through a standalone senior backend / distributed
+systems review. The overall scope still feels right: the useful next work is
+stronger evidence around boundaries and adversarial schedules, not a larger
+Raft feature matrix.
+
+One narrow correctness edge surfaced and was fixed immediately:
+
+- A single-node candidate could win from its self-vote and append the
+  current-term leader no-op, but would not advance `CommitIndex` until later
+  leader activity. Leader transition now checks whether the newly appended
+  no-op already has quorum and, if so, commits and applies it through the normal
+  `Run` path. Regression coverage verifies the singleton no-op is committed and
+  applied immediately.
+
+Remaining bounded hardening work:
+
+- **Full gRPC cluster smoke test.**
+  Run a three-node cluster through the real gRPC adapters, elect a leader,
+  submit one client command, and observe replication and application.
+
+- **Adverse-network integration case.**
+  Extend the in-memory transport with one asymmetric/delayed/reordered RPC
+  scenario so a stale reply is produced by the cluster harness rather than only
+  constructed directly in unit tests.
+
+- **Public configuration validation.**
+  Move basic invariants into the `node` construction boundary: reject the local
+  ID in `Peers`, invalid timing relationships, and other obviously nonsensical
+  configurations rather than relying on `cmd/node` to validate them.
+
+After that, stop unless a new project goal requires more. Snapshots, membership
+changes, pre-vote/check-quorum, optimized conflict hints, ReadIndex,
+deduplication, and production operational machinery remain deliberately outside
+this project's scope.

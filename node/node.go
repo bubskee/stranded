@@ -205,9 +205,17 @@ func (n *Node) run(ctx context.Context, ticks <-chan time.Time) error {
 			}
 
 			if result.startElection {
-				e, err := n.startElection()
+				e, commitAdvanced, err := n.startElection()
 				if err != nil {
 					return err
+				}
+
+				if commitAdvanced {
+					if err := n.applyCommitted(ctx); err != nil {
+						return err
+					}
+
+					n.completeAppliedClientRequests()
 				}
 
 				n.sendRequestVotes(ctx, e, voteReplies)

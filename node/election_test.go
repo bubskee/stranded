@@ -343,19 +343,22 @@ func TestSingleNodeElectionBecomesLeader(t *testing.T) {
 			},
 			transport: unavailableTransport{},
 			storage:   &memoryStorage{},
+			applyCh:   make(chan LogEntry, 1),
 		}
 
 		go func() {
 			_ = n.Run(ctx)
 		}()
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(110 * time.Millisecond)
 		synctest.Wait()
 
 		n.mu.Lock()
 		role := n.role
 		term := n.persistent.CurrentTerm
 		votedFor := n.persistent.VotedFor
+		commitIndex := n.volatile.CommitIndex
+		lastApplied := n.volatile.LastApplied
 		n.mu.Unlock()
 
 		if role != Leader {
@@ -368,6 +371,38 @@ func TestSingleNodeElectionBecomesLeader(t *testing.T) {
 
 		if votedFor != "node-a" {
 			t.Errorf("vote after single-node election: got %q, want %q", votedFor, "node-a")
+		}
+
+		if commitIndex != 1 {
+			t.Errorf(
+				"commit index after single-node election: got %d, want 1",
+				commitIndex,
+			)
+		}
+
+		if lastApplied != 1 {
+			t.Errorf(
+				"last applied after single-node election: got %d, want 1",
+				lastApplied,
+			)
+		}
+
+		select {
+		case entry := <-n.applyCh:
+			if entry.Index != 1 {
+				t.Errorf("applied index: got %d, want 1", entry.Index)
+			}
+
+			if entry.Term != 1 {
+				t.Errorf("applied term: got %d, want 1", entry.Term)
+			}
+
+			if entry.Command != nil {
+				t.Errorf("applied command: got %q, want no-op", entry.Command)
+			}
+
+		default:
+			t.Fatal("single-node leader no-op was not applied")
 		}
 	})
 }

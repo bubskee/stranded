@@ -33,7 +33,7 @@ type requestVoteProcessResult struct {
 	failedClients []chan clientRequestResult
 }
 
-func (n *Node) startElection() (election, error) {
+func (n *Node) startElection() (election, bool, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -42,7 +42,7 @@ func (n *Node) startElection() (election, error) {
 	next.VotedFor = n.cfg.ID
 
 	if err := n.storage.Save(next); err != nil {
-		return election{}, err
+		return election{}, false, err
 	}
 
 	n.persistent = next
@@ -71,13 +71,17 @@ func (n *Node) startElection() (election, error) {
 		args: args,
 	}
 
+	commitAdvanced := false
+
 	if n.hasElectionQuorumLocked() {
 		if err := n.becomeLeaderLocked(); err != nil {
-			return election{}, err
+			return election{}, false, err
 		}
+
+		commitAdvanced = n.advanceLeaderCommitLocked()
 	}
 
-	return e, nil
+	return e, commitAdvanced, nil
 }
 
 func (n *Node) sendRequestVotes(
